@@ -1,0 +1,36 @@
+#!/bin/sh
+
+# PROVIDE: mfscgiserv
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+#
+# Add the following to /etc/rc.conf to enable mfscgiserv:
+#
+# mfscgiserv="YES"
+#
+
+if [ -f /etc/rc.subr ]; then
+	. /etc/rc.subr
+fi
+
+name="mfscgiserv"
+rcvar=$name
+command="/usr/local/sbin/mfscgiserv"
+
+start_cmd="mfs_doit start"
+stop_cmd="mfs_doit stop"
+restart_cmd="mfs_doit restart"
+test_cmd="mfs_doit test"
+
+mfs_doit()
+{
+	${command} $*
+}
+
+if [ -f /etc/rc.subr ]; then
+	load_rc_config $name
+	run_rc_command "$1"
+else
+	echo -n " ${name}"
+	${command} $*
+fi

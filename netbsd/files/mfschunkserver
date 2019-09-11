@@ -1,0 +1,39 @@
+#!/bin/sh
+
+# PROVIDE: mfschunkserver
+# REQUIRE: DAEMON
+# KEYWORD: shutdown
+#
+# Add the following to /etc/rc.conf to enable mfschunkserver:
+#
+# mfschunkserver="YES"
+#
+
+if [ -f /etc/rc.subr ]; then
+	. /etc/rc.subr
+fi
+
+name="mfschunkserver"
+rcvar=$name
+command="/usr/local/sbin/mfschunkserver"
+
+start_cmd="mfs_doit start"
+stop_cmd="mfs_doit stop"
+restart_cmd="mfs_doit restart"
+reload_cmd="mfs_doit reload"
+info_cmd="mfs_doit info"
+test_cmd="mfs_doit test"
+kill_cmd="mfs_doit kill"
+
+mfs_doit()
+{
+	${command} $*
+}
+
+if [ -f /etc/rc.subr ]; then
+	load_rc_config $name
+	run_rc_command "$1"
+else
+	echo -n " ${name}"
+	${command} $*
+fi
