@@ -294,15 +294,17 @@ uint8_t exports_check(uint32_t ip,uint32_t version,const uint8_t *path,const uin
 			if (f==NULL) {
 				f=e;
 			} else {
-				if ((e->sesflags&SESFLAG_READONLY)==0 && (f->sesflags&SESFLAG_READONLY)!=0) {	// prefer rw to ro
+				if ((e->toip - e->fromip) < (f->toip - f->fromip)) {	// prefer more specific address match
+					f=e;
+				} else if (e->pleng > f->pleng) {	// prefer more accurate path
+					f=e;
+				} else if ((e->sesflags&SESFLAG_READONLY)==0 && (f->sesflags&SESFLAG_READONLY)!=0) {	// prefer rw to ro
 					f=e;
 				} else if (e->rootuid==0 && f->rootuid!=0) {	// prefer root not restricted to restricted
 					f=e;
 				} else if ((e->sesflags&SESFLAG_ADMIN)!=0 && (f->sesflags&SESFLAG_ADMIN)==0) {	// prefer lines with more privileges
 					f=e;
 				} else if (e->needpassword==1 && f->needpassword==0) {	// prefer lines with passwords
-					f=e;
-				} else if (e->pleng > f->pleng) {	// prefer more accurate path
 					f=e;
 				}
 			}
