@@ -1,0 +1,5 @@
+#!/bin/sh
+#
+# first of all, run 'autoreconf -vi'
+#
+./configure --with-default-user=mfs --with-default-group=mfs
