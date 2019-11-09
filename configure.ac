@@ -2,8 +2,9 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.60)
-AC_INIT([MFS], [3.0.106], [bugs@moosefs.com], [moosefs])
+AC_INIT([MFS], [3.0.107], [bugs@moosefs.com], [moosefs])
 release=1
+buildno=$(cat buildno.txt)
 
 dnl AC_CONFIG_SRCDIR([MFSCommunication.h])
 AC_CONFIG_HEADER([config.h])
@@ -22,8 +23,32 @@ AC_DEFINE_UNQUOTED([VERSHEX], [(($versmaj)*0x10000+($versmid)*0x100+($versmin)*2
 #AC_DEFINE_UNQUOTED([VERSMIN], [$versmin], [Minor MFS version])
 #AC_DEFINE_UNQUOTED([VERSHEX], [(($versmaj)*0x10000+($versmid)*0x100+($versmin))], [Full MFS version as a hex number])
 AC_DEFINE_UNQUOTED([RELEASE], [$release], [Release number])
+AC_DEFINE_UNQUOTED([BUILDNO], [$buildno], [Build number])
 AC_DEFINE([VERSION2INT(maj,med,min)], [((maj)*0x10000+(med)*0x100+(((maj)>1)?((min)*2):(min)))], [Version converter from human readable format to binary format used in MFS packets])
 AC_DEFINE_UNQUOTED([VERSSTR], ["${PACKAGE_VERSION}-${release}"], [MFS version - string])
+
+# Define paths
+test "$prefix" = "NONE" && prefix="$ac_default_prefix"
+test "$exec_prefix" = "NONE" && exec_prefix="$prefix"
+eval DATA_PATH="${localstatedir}/mfs"
+eval ETC_PATH="${sysconfdir}"
+eval BIN_PATH="${bindir}"
+eval SBIN_PATH="${sbindir}"
+# use system /var/run when using system-wide installation prefix
+if test "${prefix#/usr}" != "${prefix}" -o "${prefix#/opt}" != "${prefix}"; then
+	RUN_PATH="/var/run/mfs"
+else
+	RUN_PATH="${prefix}/var/run/mfs"
+fi
+AC_SUBST([DATA_PATH])
+AC_SUBST([ETC_PATH])
+AC_SUBST([BIN_PATH])
+AC_SUBST([SBIN_PATH])
+AC_SUBST([RUN_PATH])
+AC_DEFINE_UNQUOTED([PREFIX], ["${prefix}"], [Installation prefix])
+AC_DEFINE_UNQUOTED([ETC_PATH], ["$ETC_PATH"], [Configuration directory])
+AC_DEFINE_UNQUOTED([DATA_PATH], ["$DATA_PATH"], [Data directory])
+AC_DEFINE_UNQUOTED([RUN_PATH], ["$RUN_PATH"], [PID file directory])
 
 # Checks for programs.
 AM_PROG_AR
@@ -40,12 +65,27 @@ if test "X$MFS_FORCE_DEBUG" = "XYES"; then
 	enable_debug=yes
 fi
 
+AX_CHECK_COMPILE_FLAG([-std=c11], [ CCSTD="-std=c11" ], [
+	AX_CHECK_COMPILE_FLAG([-std=gnu99], [ CCSTD="-std=gnu99" ], [
+		AX_CHECK_COMPILE_FLAG([-std=c99], [ CCSTD="-std=c99" ], [
+			CCSTD=""
+		])
+	])
+])
+
+if test "$CCSTD" = "-std=c11"; then
+	ac_have_atomics=maybe
+	AC_DEFINE([HAVE_C11_COMPILER], [1], [Compiler understands C11 standard])
+else
+	ac_have_atomics=no
+fi
+
 if test "$GCC" = "yes"; then
 	if test "$enable_externalcflags" != "yes" ; then
 		if test "$enable_gperftools" = "yes" -o "$enable_debug" = "yes" ; then
-			CFLAGS="-O0 -fno-omit-frame-pointer -g -DMFSDEBUG -std=c99 -Wall -Wextra -Wshadow -pedantic -fwrapv"
+			CFLAGS="-O0 -fno-omit-frame-pointer -g -DMFSDEBUG $CCSTD -Wall -Wextra -Wshadow -pedantic -fwrapv"
 		else
-			CFLAGS="-O2 $CFLAGS -g -std=c99 -Wall -Wextra -Wshadow -pedantic -fwrapv"
+			CFLAGS="-O2 $CFLAGS -g $CCSTD -Wall -Wextra -Wshadow -pedantic -fwrapv"
 		fi
 	fi
 	if test "$enable_gperftools" = "yes"; then
@@ -62,7 +102,7 @@ case $target_os in
 	bdev=maybe
 	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE -DDEFAULT_SUGID_CLEAR_MODE_EXT"
 	# Check whether exec_prefix=/usr:
-	root_sbindir="${sbindir}"
+	eval root_sbindir="${sbindir}"
 	case $exec_prefix:$prefix in
 	NONE:NONE | NONE:/usr | /usr:*)
 		root_sbindir="/sbin"
@@ -249,6 +289,9 @@ AC_CHECK_FUNCS([mallopt])
 # core dumps
 AC_CHECK_HEADERS([sys/prctl.h], [AC_CHECK_FUNCS([prctl])])
 
+# check for asprintf
+AC_CHECK_FUNCS([asprintf])
+
 dnl optional thread functions
 dnl AC_CHECK_FUNCS([pthread_spin_lock])
 
@@ -339,6 +382,28 @@ if test "$ac_have___sync_fetch_and_op" = "yes" ; then
 fi
 AC_MSG_RESULT($ac_have___sync_fetch_and_op)
 
+AC_MSG_CHECKING([for __sync_bool_compare_and_swap])
+AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <sys/types.h>]],
+	       [[unsigned long long int foo; int i,j; foo = 54; i = __sync_bool_compare_and_swap(&foo,54,7); j = __sync_bool_compare_and_swap(&foo,23,77); ]])],
+	       [ac_have___sync_bool_compare_and_swap=yes], [ac_have___sync_bool_compare_and_swap=no])
+if test "$ac_have___sync_bool_compare_and_swap" = "yes" ; then
+	AC_DEFINE([HAVE___SYNC_BOOL_COMPARE_AND_SWAP], [1], [have __sync_bool_compare_and_swap intrinsic])
+fi
+AC_MSG_RESULT($ac_have___sync_bool_compare_and_swap)
+
+if test "$ac_have_atomics" != "no" ; then
+	AC_MSG_CHECKING([for _Atomic support])
+	AC_LINK_IFELSE([AC_LANG_PROGRAM([[#include <stdatomic.h>]],
+		       [[_Atomic unsigned long long int foo; atomic_init(&foo,41); atomic_fetch_add(&foo,1); ]])],
+		       [ac_have_atomics=yes], [ac_have_atomics=no])
+	AC_MSG_RESULT($ac_have_atomics)
+fi
+if test "$ac_have_atomics" = "yes" ; then
+	AC_DEFINE([HAVE_ATOMICS], [1], [have support for atomic operations])
+fi
+
+
+
 saved_cflags="$CFLAGS"
 CFLAGS="-Werror"
 AC_MSG_CHECKING([for __attribute__((fallthrough))])
@@ -375,52 +440,78 @@ AC_SUBST([systemdunitdir])
 dnl this is work in progress
 dnl AC_ARG_ENABLE([lightmfs], [AS_HELP_STRING([--enable-lightmfs], [Build special version])])
 
-AC_ARG_ENABLE([generalmans],
-	[AS_HELP_STRING([--disable-general-mans], [Do not install general mans])])
+AC_ARG_ENABLE([all],
+	[AS_HELP_STRING([--disable-all], [By default do not build anything except for manually enabled modules])])
+
+dnl AC_ARG_ENABLE([generalmans],
+dnl	[AS_HELP_STRING([--disable-general-mans], [Do not install general mans])])
+
 AC_ARG_ENABLE([mfsmaster],
-	[AS_HELP_STRING([--disable-mfsmaster], [Do not build mfsmaster])])
+	[AS_HELP_STRING([--disable-mfsmaster], [Do not build mfsmaster])],
+	[],
+	[enable_mfsmaster="$enable_all"])
 AC_ARG_ENABLE([mfsmetalogger],
-	[AS_HELP_STRING([--disable-mfsmetalogger], [Do not build mfsmetalogger])])
+	[AS_HELP_STRING([--disable-mfsmetalogger], [Do not build mfsmetalogger])],
+	[],
+	[enable_mfsmetalogger="$enable_all"])
 AC_ARG_ENABLE([mfssupervisor],
-	[AS_HELP_STRING([--disable-mfssupervisor], [Do not build mfssupervisor])])
+	[AS_HELP_STRING([--disable-mfssupervisor], [Do not build mfssupervisor])],
+	[],
+	[enable_mfssupervisor="$enable_all"])
 AC_ARG_ENABLE([mfschunkserver],
-	[AS_HELP_STRING([--disable-mfschunkserver], [Do not build mfschunkserver])])
+	[AS_HELP_STRING([--disable-mfschunkserver], [Do not build mfschunkserver])],
+	[],
+	[enable_mfschunkserver="$enable_all"])
 AC_ARG_ENABLE([mfsmount],
-	[AS_HELP_STRING([--disable-mfsmount], [Do not build mfsmount])])
+	[AS_HELP_STRING([--disable-mfsmount], [Do not build mfsmount])],
+	[],
+	[enable_mfsmount="$enable_all"])
 AC_ARG_ENABLE([mfsbdev],
-	[AS_HELP_STRING([--disable-mfsbdev], [Do not build mfsbdev])])
+	[AS_HELP_STRING([--disable-mfsbdev], [Do not build mfsbdev])],
+	[],
+	[enable_mfsbdev="$enable_all"])
 AC_ARG_ENABLE([mfscgi],
-	[AS_HELP_STRING([--disable-mfscgi], [Do not install CGI scripts])])
+	[AS_HELP_STRING([--disable-mfscgi], [Do not install CGI scripts])],
+	[],
+	[enable_mfscgi="$enable_all"])
 AC_ARG_ENABLE([mfscli],
-	[AS_HELP_STRING([--disable-mfscli], [Do not install CLI script])])
+	[AS_HELP_STRING([--disable-mfscli], [Do not install CLI script])],
+	[],
+	[enable_mfscli="$enable_all"])
 AC_ARG_ENABLE([mfscgiserv],
-	[AS_HELP_STRING([--disable-mfscgiserv], [Do not install CGI server])])
+	[AS_HELP_STRING([--disable-mfscgiserv], [Do not install CGI server])],
+	[],
+	[enable_mfscgiserv="$enable_all"])
 AC_ARG_ENABLE([mfsnetdump],
-	[AS_HELP_STRING([--disable-mfsnetdump], [Do not build mfsnetdump])])
+	[AS_HELP_STRING([--disable-mfsnetdump], [Do not build mfsnetdump])],
+	[],
+	[enable_mfsnetdump="$enable_all"])
 AC_ARG_WITH([mfscgi-dir],
 	[AS_HELP_STRING([--with-mfscgi-dir=CGIDIR], [Choose CGI directory (default=DATADIR/mfscgi)])],
-	[CGIDIR=$withval],
-	[CGIDIR=$datadir/mfscgi])
+	[CGIDIR="${withval}"],
+	[eval eval CGIDIR="${datadir}/mfscgi"])
 AC_ARG_WITH([mfscgiserv-dir],
 	[AS_HELP_STRING([--with-mfscgiserv-dir=CGISERVDIR], [Choose CGI directory (default=SBINDIR)])],
-	[CGISERVDIR=$withval],
-	[CGISERVDIR=$sbindir])
+	[CGISERVDIR="${withval}"],
+	[eval CGISERVDIR="${sbindir}"])
 AC_ARG_WITH([zlib],
 	[AS_HELP_STRING([--without-zlib], [Do not use zlib for PNG compression])],
-	[use_zlib=$withval],
+	[use_zlib="${withval}"],
 	[use_zlib=yes])
 AC_ARG_WITH([systemdsystemunitdir],
 	[AS_HELP_STRING([--with-systemdsystemunitdir=PATH], [Path to install systemd units (no=omit)])],
-	[systemdunitdir=$withval])
+	[systemdunitdir="${withval}"])
 
 AM_CONDITIONAL([WITH_SYSTEMD], [test "$systemdunitdir" != "no"])
 
-AC_CHECK_PROGS(PYTHON, [python3 python2 python], [na])
-if test "$PYTHON" = na; then
-	PYTHON = "python"
-	AC_MSG_RESULT([Python binary not found !!!])
-else
-	AC_MSG_RESULT([Python binary for script shebangs: $PYTHON])
+if test "$enable_mfscgi" != "no" -o "$enable_mfscli" != "no" -o "$enable_mfscgiserv" != "no"; then
+	AC_CHECK_PROGS(PYTHON, [python3 python2 python python3.7 python3.6 python3.5 python3.4 python2.7], [na])
+	if test "$PYTHON" = na; then
+		PYTHON="python"
+		AC_MSG_RESULT([Python binary not found !!! - using default in shebangs])
+	else
+		AC_MSG_RESULT([Python binary for script shebangs: $PYTHON])
+	fi
 fi
 
 dnl AX_PYTHON
@@ -472,7 +563,7 @@ AM_CONDITIONAL([WITH_BDEV], [test "$bdev" != "no" -a "$enable_mfsbdev" != "no"])
 
 if test "$fuse" != "no" -a "enable_mfsmount" != "no"; then
 	if test -n "$PKG_CONFIG"; then
-		PKG_CHECK_MODULES([FUSE], [fuse >= 2.6], , [fuse=no])
+		PKG_CHECK_MODULES([FUSE], [fuse3 >= 3.2.1], [AC_DEFINE([HAVE_FUSE3],[1],[libfuse3 detected])] , [ PKG_CHECK_MODULES([FUSE], [fuse >= 2.6], , [fuse=no]) ])
 	else
 		echo "no pkg-config - can't check FUSE version"
 		fuse=no
@@ -538,36 +629,14 @@ if test "$use_zlib" = "yes"; then
 	AC_SUBST([ZLIB_LIBS])
 fi
 
-test "$prefix" = "NONE" && prefix=$ac_default_prefix
-test "$exec_prefix" = "NONE" && exec_prefix=$prefix
-eval DATA_PATH=${localstatedir}/mfs
-eval ETC_PATH=${sysconfdir}
-eval BIN_PATH=${bindir}
-eval SBIN_PATH=${sbindir}
-# use system /var/run when using system-wide installation prefix
-if test "${prefix#/usr}" != "${prefix}" -o "${prefix#/opt}" != "${prefix}"; then
-	RUN_PATH=/var/run/mfs
-else
-	RUN_PATH=${prefix}/var/run/mfs
-fi
-AC_SUBST([DATA_PATH])
-AC_SUBST([ETC_PATH])
-AC_SUBST([BIN_PATH])
-AC_SUBST([SBIN_PATH])
-AC_SUBST([RUN_PATH])
-AC_DEFINE_UNQUOTED([PREFIX], ["${prefix}"], [Installation prefix])
-AC_DEFINE_UNQUOTED([ETC_PATH], ["$ETC_PATH"], [Configuration directory])
-AC_DEFINE_UNQUOTED([DATA_PATH], ["$DATA_PATH"], [Data directory])
-AC_DEFINE_UNQUOTED([RUN_PATH], ["$RUN_PATH"], [PID file directory])
-
 DEFAULT_USER=nobody
 DEFAULT_GROUP=
 AC_ARG_WITH([default-user],
 	[AS_HELP_STRING([--with-default-user=USER], [Choose default user to run daemons as])],
-	[DEFAULT_USER=$withval])
+	[DEFAULT_USER="${withval}"])
 AC_ARG_WITH([default-group],
 	[AS_HELP_STRING([--with-default-group=GROUP], [Choose default group to run daemons as])],
-	[DEFAULT_GROUP=$withval])
+	[DEFAULT_GROUP="${withval}"])
 AC_DEFINE_UNQUOTED([DEFAULT_USER], ["$DEFAULT_USER"], [Default working user])
 AC_DEFINE_UNQUOTED([DEFAULT_GROUP], ["$DEFAULT_GROUP"], [Default working group])
 AC_SUBST([DEFAULT_USER])
@@ -577,10 +646,10 @@ DEFAULT_PORTBASE=9400
 DEFAULT_MASTERNAME=mfsmaster
 AC_ARG_WITH([default-portbase],
 	[AS_HELP_STRING([--with-default-portbase=NUMBER], [Default communiaction port base (default=9400, which means ports 9419,9420,etc.)])],
-	[DEFAULT_PORTBASE=$withval])
+	[DEFAULT_PORTBASE="${withval}"])
 AC_ARG_WITH([default-mastername],
 	[AS_HELP_STRING([--with-default-mastername=MASTER_DNS_NAME], [Defines default DNS name pointing to all masters (default=mfsmaster)])],
-	[DEFAULT_MASTERNAME=$withval])
+	[DEFAULT_MASTERNAME="${withval}"])
 DEFAULT_MASTER_CONTROL_PORT=$((DEFAULT_PORTBASE+19))
 DEFAULT_MASTER_CS_PORT=$((DEFAULT_PORTBASE+20))
 DEFAULT_MASTER_CLIENT_PORT=$((DEFAULT_PORTBASE+21))
@@ -614,6 +683,7 @@ AC_DEFINE_UNQUOTED([PROTO_BASE], [$PROTO_BASE], [Base value for protocol command
 AC_DEFINE_UNQUOTED([LIGHT_MFS], [$LIGHT_MFS], [Build light version])
 
 AC_SUBST([release])
+AC_SUBST([buildno])
 
 AC_CONFIG_FILES([Makefile
 		mfsmanpages/Makefile
@@ -645,3 +715,51 @@ AC_CONFIG_FILES([Makefile
 		systemd/moosefs-metalogger@.service
 ])
 AC_OUTPUT
+echo
+echo "Summary:"
+echo
+echo "VERSION / RELEASE / BUILDNO ......... ${PACKAGE_VERSION} / ${release} / ${buildno}"
+echo
+echo "CC .................................. $CC"
+echo "CFLAGS .............................. $CFLAGS"
+echo "CPPFLAGS ............................ $CPPFLAGS"
+echo "PYTHON .............................. $PYTHON"
+echo
+echo "PREFIX .............................. ${prefix}"
+echo "RUN_PATH ............................ $RUN_PATH"
+echo "DATA_PATH ........................... $DATA_PATH"
+echo "ETC_PATH ............................ $ETC_PATH"
+echo "BIN_PATH ............................ $BIN_PATH"
+echo "SBIN_PATH ........................... $SBIN_PATH"
+echo "CGI_PATH ............................ $CGIDIR"
+echo "CGISERV_PATH ........................ $CGISERVDIR"
+echo
+echo "DEFAULT_USER:DEFAULT_GROUP .......... ${DEFAULT_USER}:${DEFAULT_GROUP}"
+echo "MASTER DNS NAME ..................... ${DEFAULT_MASTERNAME}"
+echo "PORTS ............................... ${DEFAULT_MASTER_CONTROL_PORT}:${DEFAULT_MASTER_CS_PORT}:${DEFAULT_MASTER_CLIENT_PORT}:${DEFAULT_CS_DATA_PORT}:${DEFAULT_CGISERV_HTTP_PORT}"
+echo
+if test "$BUILD_MASTER_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_MASTER ........................ $RESULT"
+if test "$BUILD_METALOGGER_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_METALOGGER .................... $RESULT"
+if test "$BUILD_SUPERVISOR_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_SUPERVISOR .................... $RESULT"
+if test "$BUILD_CHUNKSERVER_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_CHUNKSERVER ................... $RESULT"
+if test "$BUILD_NETDUMP_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_NETDUMP ....................... $RESULT"
+if test "$BUILD_SCRIPTS_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_SCRIPTS ....................... $RESULT"
+if test "$INSTALL_CGI_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "    CGI ............................. $RESULT"
+if test "$INSTALL_CLI_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "    CLI ............................. $RESULT"
+if test "$INSTALL_CGISERV_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "    CGISERV ......................... $RESULT"
+if test "$BUILD_CLIENT_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "BUILD_CLIENT ........................ $RESULT"
+if test "$WITH_MOUNT_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "    MOUNT ........................... $RESULT"
+if test "$WITH_BDEV_TRUE" = ""; then RESULT="yes"; else RESULT="no"; fi
+echo "    BDEV ............................ $RESULT"
+echo

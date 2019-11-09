@@ -25,6 +25,7 @@
 #if defined(__NetBSD__)
 #  define _KMEMUSER
 #endif
+
 #include <sys/types.h>
 #if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__)
 #  include <sys/sysctl.h>

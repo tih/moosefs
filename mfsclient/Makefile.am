@@ -13,7 +13,7 @@ AM_CFLAGS=
 AM_LDFLAGS=
 
 mfsmount_LDADD=$(PTHREAD_LIBS) $(FUSE_LIBS)
-mfsmount_CFLAGS=$(PTHREAD_CFLAGS) -D_USE_PTHREADS $(FUSE_CFLAGS) -DFUSE_USE_VERSION=29 -DAPPNAME=mfsmount -DMFSMOUNT=1
+mfsmount_CFLAGS=$(PTHREAD_CFLAGS) -D_USE_PTHREADS $(FUSE_CFLAGS) -DAPPNAME=mfsmount -DMFSMOUNT=1
 mfsmount_CPPFLAGS=$(PTHREAD_CPPFLAGS) -I$(top_srcdir)/mfscommon
 
 mfsmount_SOURCES=\
@@ -25,6 +25,7 @@ mfsmount_SOURCES=\
 	fdcache.c fdcache.h \
 	sustained_inodes.c sustained_inodes.h \
 	sustained_stats.c sustained_stats.h \
+	inoleng.c inoleng.h \
 	getgroups.c getgroups.h \
 	mfs_fuse.c mfs_fuse.h \
 	mfs_meta_fuse.c mfs_meta_fuse.h \
@@ -41,6 +42,7 @@ mfsmount_SOURCES=\
 	stats.c stats.h \
 	oplog.c oplog.h \
 	mfsmount.c mfsmount.h \
+	fusecommon.h \
 	../mfscommon/clocks.c ../mfscommon/clocks.h \
 	../mfscommon/delayrun.c ../mfscommon/delayrun.h \
 	../mfscommon/pcqueue.c ../mfscommon/pcqueue.h \
@@ -71,6 +73,7 @@ libmfsio_la_SOURCES=\
 	chunkrwlock.c chunkrwlock.h \
 	readdata.c readdata.h \
 	writedata.c writedata.h \
+	inoleng.c inoleng.h \
 	csdb.c csdb.h \
 	stats.c stats.h \
 	mfsio.c mfsio.h \

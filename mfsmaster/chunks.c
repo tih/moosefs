@@ -271,7 +271,6 @@ static uint32_t chunks_priority_tail[DANGER_PRIORITIES];
 static double chunks_priority_mincpsperc[DANGER_PRIORITIES] = {1.0,0.1,0.1,0.01,0.05,0.01,0.3};
 
 static uint32_t ReplicationsDelayInit=60;
-static uint32_t RemoveDelayDisconnect=3600;
 static uint32_t DangerMaxLeng=1000000;
 
 static double MaxWriteRepl[4];
@@ -1209,7 +1208,7 @@ static inline int chunk_remove_disconnected_chunks(chunk *c) {
 	if (disc==0) {
 		return 0;
 	}
-	if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && ((csdb_getdisconnecttime()+RemoveDelayDisconnect)<main_time())) {
+	if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		changelog("%"PRIu32"|CHUNKDEL(%"PRIu64",%"PRIu32")",main_time(),c->chunkid,c->version);
 		chunk_delete(c);
 		return 1;
@@ -2513,7 +2512,7 @@ void chunk_lost(uint16_t csid,uint64_t chunkid) {
 			sptr = &(s->next);
 		}
 	}
-	if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && ((csdb_getdisconnecttime()+RemoveDelayDisconnect)<main_time())) {
+	if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		changelog("%"PRIu32"|CHUNKDEL(%"PRIu64",%"PRIu32")",main_time(),c->chunkid,c->version);
 		chunk_delete(c);
 	} else {
@@ -2719,7 +2718,7 @@ void chunk_got_delete_status(uint16_t csid,uint64_t chunkid,uint8_t status) {
 			st = &(s->next);
 		}
 	}
-	if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && ((csdb_getdisconnecttime()+RemoveDelayDisconnect)<main_time())) {
+	if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		changelog("%"PRIu32"|CHUNKDEL(%"PRIu64",%"PRIu32")",main_time(),c->chunkid,c->version);
 		chunk_delete(c);
 	}
@@ -3166,6 +3165,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 	static uint16_t *rcsids = NULL;
 	uint16_t rservcount;
 	uint16_t srccsid,dstcsid;
+	double repl_read_counter;
 	uint16_t i,j,k;
 	uint32_t vc,tdc,ivc,bc,tdb,dc,wvc,tdw;
 	uint32_t goal;
@@ -3934,9 +3934,8 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 				unmatched = 1;
 			}
 			srcusage = matocsserv_get_usage(cstab[servers[i]].ptr);
-			lclass = matocsserv_is_privileged(cstab[servers[i]].ptr,0)?3:2;
-//			lclass = (matocsserv_can_create_chunks(cstab[servers[i]].ptr,AcceptableDifference*1.5)<2)?2:3;
-			if (matocsserv_replication_read_counter(cstab[servers[i]].ptr,now)<MaxReadRepl[lclass]) {
+			repl_read_counter = matocsserv_replication_read_counter(cstab[servers[i]].ptr,now);
+			if (repl_read_counter < MaxReadRepl[2] || repl_read_counter < MaxReadRepl[3]) { // here accept any rebalance limit
 				for (j=0 ; j<dservcount ; j++) {
 					for (k=0 ; k<extraservcnt && servers[k]!=dcsids[j] ; k++) { }
 					if (k==extraservcnt) { // not one of copies
@@ -3948,9 +3947,12 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 							break;
 						}
 						if (unmatched || matocsserv_server_has_labels(cstab[dcsids[j]].ptr,labelmask)) {
-							lclass = matocsserv_is_privileged(cstab[dcsids[j]].ptr,1)?3:2;
-//							lclass = matocsserv_can_create_chunks(cstab[dcsids[j]].ptr,AcceptableDifference*1.5)?2:3;
-							if (matocsserv_replication_write_counter(cstab[dcsids[j]].ptr,now)<MaxWriteRepl[lclass]) {
+							if ((srcusage - dstusage) > AcceptableDifference*1.5) { // now we know usage difference, so we can set proper limit class
+								lclass = 3;
+							} else {
+								lclass = 2;
+							}
+							if (repl_read_counter < MaxReadRepl[lclass] && matocsserv_replication_write_counter(cstab[dcsids[j]].ptr,now)<MaxWriteRepl[lclass]) {
 								maxdiff = srcusage - dstusage;
 								dstcsid = dcsids[j];
 								srccsid = servers[i];
@@ -3962,9 +3964,6 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 		}
 
 		if (dstcsid!=MAXCSCOUNT && srccsid!=MAXCSCOUNT) {
-			if (maxdiff > AcceptableDifference*1.5) {
-				matocsserv_want_to_be_privileged(cstab[dstcsid].ptr,cstab[srccsid].ptr);
-			}
 			stats_chunkops[CHUNK_OP_REPLICATE_TRY]++;
 			matocsserv_send_replicatechunk(cstab[dstcsid].ptr,c->chunkid,c->version,cstab[srccsid].ptr);
 			c->needverincrease = 1;
@@ -4210,7 +4209,7 @@ void chunk_jobs_main(void) {
 			c = chunkhashtab[jobshpos>>HASHTAB_LOBITS][jobshpos&HASHTAB_MASK];
 			while (c) {
 				cn = c->next;
-				if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && ((csdb_getdisconnecttime()+RemoveDelayDisconnect)<main_time())) {
+				if (c->lockedto<(uint32_t)main_time() && c->slisthead==NULL && c->fcount==0 && c->ondangerlist==0 && chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 					changelog("%"PRIu32"|CHUNKDEL(%"PRIu64",%"PRIu32")",main_time(),c->chunkid,c->version);
 					chunk_delete(c);
 				} else {

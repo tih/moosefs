@@ -1152,6 +1152,7 @@ void* write_worker(void *arg) {
 					put32bit(&wptr,0);
 					sent = 0;
 					sending_mode = 3;
+					lastsent = now;
 				}
 			}
 
@@ -1436,7 +1437,9 @@ void* write_worker(void *arg) {
 		if (optimeout>0.0 && monotonic_seconds() - opbegin > optimeout) {
 			unbreakable = 0;
 		} else if (status!=0) {
-			chd->trycnt++;
+			if (wrstatus!=MFS_ERROR_NOTDONE) {
+				chd->trycnt++;
+			}
 			if (chd->trycnt>=maxretries) {
 				unbreakable = 0;
 			}
@@ -1481,7 +1484,11 @@ void* write_worker(void *arg) {
 				if (chd->trycnt>=maxretries) {
 					write_job_end(chd,status,0);
 				} else {
-					write_job_end(chd,0,1000+((chd->trycnt<30)?((chd->trycnt-1)*300000):10000000));
+					if (wrstatus==MFS_ERROR_NOTDONE) {
+						write_job_end(chd,0,300000);
+					} else {
+						write_job_end(chd,0,1000+((chd->trycnt<30)?((chd->trycnt-1)*300000):10000000));
+					}
 				}
 			} else {
 				if (valid_offsets) {

@@ -1113,7 +1113,7 @@ void matoclserv_info(matoclserventry *eptr,const uint8_t *data,uint32_t length) 
 	fs_info(&totalspace,&availspace,&freespace,&trspace,&trnodes,&respace,&renodes,&inodes,&dnodes,&fnodes);
 	chunk_info(&chunks,&chunkcopies,&tdcopies);
 	chartsdata_resusage(&memusage,&syscpu,&usercpu);
-	ptr = matoclserv_createpacket(eptr,MATOCL_INFO,137);
+	ptr = matoclserv_createpacket(eptr,MATOCL_INFO,149);
 	/* put32bit(&buff,VERSION): */
 	put16bit(&ptr,VERSMAJ);
 	put8bit(&ptr,VERSMID);
@@ -1145,6 +1145,8 @@ void matoclserv_info(matoclserventry *eptr,const uint8_t *data,uint32_t length) 
 	put32bit(&ptr,0);
 	put64bit(&ptr,meta_version());
 	put64bit(&ptr,exports_checksum());
+	put64bit(&ptr,main_utime());
+	put32bit(&ptr,0);
 }
 
 void matoclserv_memory_info(matoclserventry *eptr,const uint8_t *data,uint32_t length) {
@@ -1778,9 +1780,7 @@ void matoclserv_fuse_amtime_inodes(matoclserventry *eptr,const uint8_t *data,uin
 
 void matoclserv_fuse_time_sync(matoclserventry *eptr,const uint8_t *data,uint32_t length) {
 	uint8_t *ptr;
-	struct timeval tv;
 	uint32_t msgid;
-	uint64_t usectime;
 
 	if (length!=0 && length!=4) {
 		syslog(LOG_NOTICE,"CLTOMA_FUSE_TIME_SYNC - wrong size (%"PRIu32"/0)",length);
@@ -1794,16 +1794,11 @@ void matoclserv_fuse_time_sync(matoclserventry *eptr,const uint8_t *data,uint32_
 		msgid = 0;
 	}
 
-	gettimeofday(&tv,NULL);
-	usectime = tv.tv_sec;
-	usectime *= 1000000;
-	usectime += tv.tv_usec;
-
 	ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_TIME_SYNC,8+length);
 	if (length==4) {
 		put32bit(&ptr,msgid);
 	}
-	put64bit(&ptr,usectime);
+	put64bit(&ptr,main_utime());
 }
 
 uint32_t* matoclserv_gid_storage(uint32_t gids) {
@@ -2434,7 +2429,7 @@ void matoclserv_fuse_mkdir(matoclserventry *eptr,const uint8_t *data,uint32_t le
 }
 
 void matoclserv_fuse_unlink(matoclserventry *eptr,const uint8_t *data,uint32_t length) {
-	uint32_t inode,uid,gids;
+	uint32_t inode,uid,gids,uinode;
 	uint32_t *gid;
 	uint32_t i;
 	uint8_t nleng;
@@ -2475,15 +2470,21 @@ void matoclserv_fuse_unlink(matoclserventry *eptr,const uint8_t *data,uint32_t l
 		}
 	}
 	sessions_ugid_remap(eptr->sesdata,&uid,gid);
-	status = fs_unlink(sessions_get_rootinode(eptr->sesdata),sessions_get_sesflags(eptr->sesdata),inode,nleng,name,uid,gids,gid);
-	ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_UNLINK,5);
-	put32bit(&ptr,msgid);
-	put8bit(&ptr,status);
+	status = fs_unlink(sessions_get_rootinode(eptr->sesdata),sessions_get_sesflags(eptr->sesdata),inode,nleng,name,uid,gids,gid,&uinode);
+	if (((eptr->version>=VERSION2INT(3,0,107) && eptr->version<VERSION2INT(4,0,0)) || eptr->version>=VERSION2INT(4,18,0)) && status==MFS_STATUS_OK) {
+		ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_UNLINK,8);
+		put32bit(&ptr,msgid);
+		put32bit(&ptr,uinode);
+	} else {
+		ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_UNLINK,5);
+		put32bit(&ptr,msgid);
+		put8bit(&ptr,status);
+	}
 	sessions_inc_stats(eptr->sesdata,9);
 }
 
 void matoclserv_fuse_rmdir(matoclserventry *eptr,const uint8_t *data,uint32_t length) {
-	uint32_t inode,uid,gids;
+	uint32_t inode,uid,gids,uinode;
 	uint32_t *gid;
 	uint32_t i;
 	uint8_t nleng;
@@ -2524,10 +2525,16 @@ void matoclserv_fuse_rmdir(matoclserventry *eptr,const uint8_t *data,uint32_t le
 		}
 	}
 	sessions_ugid_remap(eptr->sesdata,&uid,gid);
-	status = fs_rmdir(sessions_get_rootinode(eptr->sesdata),sessions_get_sesflags(eptr->sesdata),inode,nleng,name,uid,gids,gid);
-	ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_RMDIR,5);
-	put32bit(&ptr,msgid);
-	put8bit(&ptr,status);
+	status = fs_rmdir(sessions_get_rootinode(eptr->sesdata),sessions_get_sesflags(eptr->sesdata),inode,nleng,name,uid,gids,gid,&uinode);
+	if (((eptr->version>=VERSION2INT(3,0,107) && eptr->version<VERSION2INT(4,0,0)) || eptr->version>=VERSION2INT(4,18,0)) && status==MFS_STATUS_OK) {
+		ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_RMDIR,5);
+		put32bit(&ptr,msgid);
+		put32bit(&ptr,uinode);
+	} else {
+		ptr = matoclserv_createpacket(eptr,MATOCL_FUSE_RMDIR,5);
+		put32bit(&ptr,msgid);
+		put8bit(&ptr,status);
+	}
 	sessions_inc_stats(eptr->sesdata,5);
 }
 

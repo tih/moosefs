@@ -48,12 +48,13 @@ SYSTEMDDIR=
 endif
 
 RELEASE = @release@
+BUILDNO = @buildno@
 
 ACLOCAL_AMFLAGS = -I m4
 
 SUBDIRS=mfstests mfsdata mfsmanpages $(MASTERDIR) $(METALOGGERDIR) $(SUPERVISORDIR) $(CHUNKSERVERDIR) $(CLIENTDIR) $(SCRIPTSDIR) $(NETDUMPDIR) $(SYSTEMDDIR)
 
-EXTRA_DIST=m4/ax_pthread.m4 debian rpm macosx freebsd debian_sysv_to_systemd.sh linux_build.sh macosx_build.sh freebsd_build.sh sanitize_build.sh README.md
+EXTRA_DIST=m4/ax_pthread.m4 m4/ax_check_compile_flag.m4 debian rpm macosx freebsd debian_sysv_to_systemd.sh linux_build.sh macosx_build.sh freebsd_build.sh sanitize_build.sh README.md buildno.txt
 
 distclean-local:
 	-rm -rf mfscommon/$(DEPDIR)
@@ -71,11 +72,12 @@ dist-hook:
 	rm -f tmp
 
 mfsdist: dist
+	mv $(distdir).tar.gz ../moosefs-dist/$(distdir)-b$(BUILDNO).tar.gz ; \
 	if grep -q '(WIP)' NEWS; then \
-		mv $(distdir).tar.gz ../moosefs-dist/$(distdir)-WIP.tar.gz ; \
-		ln -sf $(distdir)-WIP.tar.gz ../moosefs-dist/moosefs-3.x-LATEST.tar.gz ; \
+		ln -sf $(distdir)-b$(BUILDNO).tar.gz ../moosefs-dist/$(distdir)-WIP.tar.gz ; \
+		ln -sf $(distdir)-b$(BUILDNO).tar.gz ../moosefs-dist/moosefs-3.x-LATEST.tar.gz ; \
 	else \
-		mv $(distdir).tar.gz ../moosefs-dist/$(distdir)-$(RELEASE).tar.gz ; \
-		ln -sf $(distdir)-$(RELEASE).tar.gz ../moosefs-dist/$(distdir).tar.gz ; \
-		ln -sf $(distdir)-$(RELEASE).tar.gz ../moosefs-dist/moosefs-3.x-LATEST.tar.gz ; \
+		ln -sf $(distdir)-b$(BUILDNO).tar.gz ../moosefs-dist/$(distdir).tar.gz ; \
+		ln -sf $(distdir)-b$(BUILDNO).tar.gz ../moosefs-dist/$(distdir)-$(RELEASE).tar.gz ; \
+		ln -sf $(distdir)-b$(BUILDNO).tar.gz ../moosefs-dist/moosefs-3.x-LATEST.tar.gz ; \
 	fi

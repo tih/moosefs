@@ -526,21 +526,21 @@
 // ANY <-> ANY
 
 #define ANTOAN_NOP 0
-// [msgid:32] (msgid - only in communication from master to client)
+// [ msgid:32 ] (msgid - only in communication from master to client)
 
 // these packets are acceptable since version 1.6.27 (but not send)
 #define ANTOAN_UNKNOWN_COMMAND 1
-// [msgid:32] cmdno:32 size:32 version:32 (msgid - only in communication from master to client)
+// [ msgid:32 ] cmdno:32 size:32 version:32 (msgid - only in communication from master to client)
 
 #define ANTOAN_BAD_COMMAND_SIZE 2
-// [msgid:32] cmdno:32 size:32 version:32 (msgid - only in communication from master to client)
+// [ msgid:32 ] cmdno:32 size:32 version:32 (msgid - only in communication from master to client)
 
 
 #define ANTOAN_GET_VERSION 10
-// [msgid:32]
+// [ msgid:32 ]
 
 #define ANTOAN_VERSION 11
-// [msgid:32] version:32 strversion:string ( N*[ char:8 ] )
+// [ msgid:32 ] version:32 strversion:string ( N*[ char:8 ] )
 
 
 // METALOGGERS/MASTERS/MANAGERS <-> MASTER
@@ -590,6 +590,8 @@
 // 0x0051
 #define ANTOAN_CONFIG_VALUE (PROTO_BASE+81)
 // msgid:32 option_value:NAME
+
+
 
 // CHUNKSERVER <-> MASTER
 
@@ -1062,6 +1064,8 @@
 // 0x01A5
 #define MATOCL_FUSE_UNLINK (PROTO_BASE+421)
 // msgid:32 status:8
+// since 3.0.107 (after succesful remove):
+// msgid:32 inode:32
 
 // 0x01A6
 #define CLTOMA_FUSE_RMDIR (PROTO_BASE+422)
@@ -1071,6 +1075,8 @@
 // 0x01A7
 #define MATOCL_FUSE_RMDIR (PROTO_BASE+423)
 // msgid:32 status:8
+// since 3.0.107 (after succesful remove):
+// msgid:32 inode:32
 
 // 0x01A8
 #define CLTOMA_FUSE_RENAME (PROTO_BASE+424)
@@ -1569,6 +1575,9 @@
 // version:32 memusage:64 totalspace:64 availspace:64 trashspace:64 trashnodes:32 sustainedspace:64 sustainednodes:32 allnodes:32 dirnodes:32 filenodes:32 chunks:32 chunkcopies:32 tdcopies:32 (size = 76,version < 2.0.0)
 // version:32 memusage:64 syscpu:64 usercpu:64 totalspace:64 availspace:64 trashspace:64 trashnodes:32 sustainedspace:64 sustainednodes:32 allnodes:32 dirnodes:32 filenodes:32 chunks:32 chunkcopies:32 tdcopies:32 laststore_ts:32 laststore_duration:32 laststore_status:8 (size = 101,version < 2.0.0)
 // version:32 memusage:64 syscpu:64 usercpu:64 totalspace:64 availspace:64 trashspace:64 trashnodes:32 sustainedspace:64 sustainednodes:32 allnodes:32 dirnodes:32 filenodes:32 chunks:32 chunkcopies:32 tdcopies:32 laststore_ts:32 laststore_duration:32 laststore_status:8 state:8 nstate:8 stable:8 sync:8 leaderip:32 state_chg_time:32 meta_version:64 (size = 121,version >= 2.0.0)
+// version:32 memusage:64 syscpu:64 usercpu:64 totalspace:64 availspace:64 trashspace:64 trashnodes:32 sustainedspace:64 sustainednodes:32 allnodes:32 dirnodes:32 filenodes:32 chunks:32 chunkcopies:32 tdcopies:32 laststore_ts:32 laststore_duration:32 laststore_status:8 state:8 nstate:8 stable:8 sync:8 leaderip:32 state_chg_time:32 meta_version:64 exports_checksum:64 (size = 129,version >= 2.0.0)
+// version:32 memusage:64 syscpu:64 usercpu:64 totalspace:64 availspace:64 freespace:64 trashspace:64 trashnodes:32 sustainedspace:64 sustainednodes:32 allnodes:32 dirnodes:32 filenodes:32 chunks:32 chunkcopies:32 tdcopies:32 laststore_ts:32 laststore_duration:32 laststore_status:8 state:8 nstate:8 stable:8 sync:8 leaderip:32 state_chg_time:32 meta_version:64 exports_checksum:64 (size = 137,version >= 2.0.0)
+// version:32 memusage:64 syscpu:64 usercpu:64 totalspace:64 availspace:64 freespace:64 trashspace:64 trashnodes:32 sustainedspace:64 sustainednodes:32 allnodes:32 dirnodes:32 filenodes:32 chunks:32 chunkcopies:32 tdcopies:32 laststore_ts:32 laststore_duration:32 laststore_status:8 state:8 nstate:8 stable:8 sync:8 leaderip:32 state_chg_time:32 meta_version:64 exports_checksum:64 usec_local_time:64 last_changelog_time:32 (size = 149,version >= 2.0.0)
 
 // 0x0200
 #define CLTOMA_FSTEST_INFO (PROTO_BASE+512)

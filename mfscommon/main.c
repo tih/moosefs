@@ -102,6 +102,7 @@
 #define RM_TEST 5
 #define RM_KILL 6
 #define RM_TRY_RESTART 7
+#define RM_RESTORE 8
 
 typedef struct deentry {
 	void (*fun)(void);
@@ -401,7 +402,7 @@ void free_all_registered_entries(void) {
 	}
 }
 
-int canexit() {
+int canexit(void) {
 	ceentry *aux;
 	for (aux = cehead ; aux!=NULL ; aux=aux->next ) {
 		if (aux->fun()==0) {
@@ -411,7 +412,7 @@ int canexit() {
 	return 1;
 }
 
-uint32_t main_time() {
+uint32_t main_time(void) {
 #ifdef USE_PTHREADS
 	uint32_t ret;
 	zassert(pthread_mutex_lock(&nowlock));
@@ -423,11 +424,17 @@ uint32_t main_time() {
 #endif
 }
 
-/*
-uint64_t main_utime() {
-	return usecnow;
+uint64_t main_utime(void) {
+	struct timeval tv;
+	uint64_t usec;
+
+	gettimeofday(&tv,NULL);
+	usec = tv.tv_sec;
+	usec *= 1000000;
+	usec += tv.tv_usec;
+	return usec;
 }
-*/
+
 static inline void destruct(void) {
 	deentry *deit;
 	for (deit = dehead ; deit!=NULL ; deit=deit->next ) {
@@ -567,7 +574,7 @@ void mainloop() {
 					timeit->nextevent += timeit->useconds;
 				}
 			}
-		} else if (usecnow>prevtime+UINT64_C(3600000000)) {
+		} else if (usecnow>prevtime+UINT64_C(5000000)) {
 			// time went forward !!! - just recalculate "nextevent" time
 			for (timeit = timehead ; timeit != NULL ; timeit = timeit->next) {
 				timeit->nextevent = ((usecnow / timeit->useconds) * timeit->useconds) + timeit->usecoffset;
@@ -666,6 +673,26 @@ int initialize(void) {
 	return ok;
 }
 
+int restore(void) {
+	uint32_t i;
+	int ok;
+	ok = 1;
+	for (i=0 ; (long int)(RestoreRunTab[i].fn)!=0 && ok ; i++) {
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_lock(&nowlock));
+#endif
+		now = time(NULL);
+#ifdef USE_PTHREADS
+		zassert(pthread_mutex_unlock(&nowlock));
+#endif
+		if (RestoreRunTab[i].fn()<0) {
+			mfs_arg_syslog(LOG_ERR,"restore: %s failed !!!",RestoreRunTab[i].name);
+			ok=0;
+		}
+	}
+	return ok;
+}
+
 int initialize_late(void) {
 	uint32_t i;
 	int ok;
@@ -679,7 +706,7 @@ int initialize_late(void) {
 		zassert(pthread_mutex_unlock(&nowlock));
 #endif
 		if (LateRunTab[i].fn()<0) {
-			mfs_arg_syslog(LOG_ERR,"init: %s failed !!!",RunTab[i].name);
+			mfs_arg_syslog(LOG_ERR,"init: %s failed !!!",LateRunTab[i].name);
 			ok=0;
 		}
 	}
@@ -1189,7 +1216,7 @@ void createpath(const char *filename) {
 
 void usage(const char *appname) {
 	printf(
-"usage: %s [-vfun] [-t locktimeout] [-c cfgfile] " MODULE_OPTIONS_SYNOPIS "[start|stop|restart|reload|info|test|kill]\n"
+"usage: %s [-vfun] [-t locktimeout] [-c cfgfile] " MODULE_OPTIONS_SYNOPIS "[start|stop|restart|reload|info|test|kill|restore]\n"
 "\n"
 "-v : print version number and exit\n"
 "-f : run in foreground\n"
@@ -1259,7 +1286,7 @@ int main(int argc,char **argv) {
 	while ((ch = getopt(argc, argv, "nuvfdc:t:h?" MODULE_OPTIONS_GETOPT)) != -1) {
 		switch(ch) {
 			case 'v':
-				printf("version: %s\n",VERSSTR);
+				printf("version: %s ; build: %s\n",VERSSTR,STR(BUILDNO));
 				return 0;
 			case 'd':
 				printf("option '-d' is deprecated - use '-f' instead\n");
@@ -1309,6 +1336,8 @@ int main(int argc,char **argv) {
 			runmode = RM_TEST;
 		} else if (strcasecmp(argv[0],"kill")==0) {
 			runmode = RM_KILL;
+		} else if (strcasecmp(argv[0],"restore")==0) {
+			runmode = RM_RESTORE;
 		} else {
 			usage(appname);
 			return 1;
@@ -1433,20 +1462,33 @@ int main(int argc,char **argv) {
 			fputc(0,stderr);
 			close_msg_channel();
 		}
+		signal_cleanup();
+		cfg_term();
+		strerr_term();
+		wdunlock();
 		closelog();
 		free(logappname);
-		wdunlock();
 		return ch;
 	}
 
-	if (runmode==RM_STOP || runmode==RM_KILL || runmode==RM_RELOAD || runmode==RM_INFO || runmode==RM_TEST) {
+	ch = 0; // practically not needed after above condition - left for code elegance
+	if (runmode==RM_RESTORE) {
+		if (restore()==0) {
+			ch = 1;
+		}
+	}
+
+	if (runmode==RM_STOP || runmode==RM_KILL || runmode==RM_RELOAD || runmode==RM_INFO || runmode==RM_TEST || runmode==RM_RESTORE) {
 		if (rundaemon) {
 			close_msg_channel();
 		}
+		signal_cleanup();
+		cfg_term();
+		strerr_term();
+		wdunlock();
 		closelog();
 		free(logappname);
-		wdunlock();
-		return 0;
+		return ch;
 	}
 
 #ifdef MFS_USE_MEMLOCK
