@@ -2,7 +2,7 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ(2.60)
-AC_INIT([MFS], [3.0.107], [bugs@moosefs.com], [moosefs])
+AC_INIT([MFS], [3.0.108], [bugs@moosefs.com], [moosefs])
 release=1
 buildno=$(cat buildno.txt)
 
@@ -100,7 +100,7 @@ case $target_os in
   *linux*)
 	fuse=maybe
 	bdev=maybe
-	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE -DDEFAULT_SUGID_CLEAR_MODE_EXT"
+	CPPFLAGS="$CPPFLAGS -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -DDEFAULT_SUGID_CLEAR_MODE_EXT"
 	# Check whether exec_prefix=/usr:
 	eval root_sbindir="${sbindir}"
 	case $exec_prefix:$prefix in
