@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -61,6 +61,9 @@
 #define LOSTCHUNKLIMIT 25000
 // has to be less than MaxPacketSize on master side divided by 12
 #define NEWCHUNKLIMIT 25000
+// has to be less than MaxPacketSize on master side divided by 12
+#define CHANGEDCHUNKLIMIT 25000
+
 
 #define REPORT_LOAD_FREQ 5
 #define REPORT_SPACE_FREQ 1
@@ -141,6 +144,7 @@ static uint64_t stats_bytesin=0;
 
 // from config
 // static uint32_t BackLogsNumber;
+static uint32_t ChunksPerRegisterPacket;
 static char *MasterHost;
 static char *MasterPort;
 static char *BindHost;
@@ -148,8 +152,11 @@ static uint32_t Timeout;
 static uint16_t ChunkServerID = 0;
 static uint64_t MetaID = 0;
 static char *AuthCode = NULL;
+static uint32_t LabelMask = 0;
 
 static uint64_t hddmetaid;
+
+static int reconnectisneeded = 0;
 
 // static FILE *logfd;
 
@@ -304,31 +311,77 @@ uint8_t* masterconn_create_attached_packet(masterconn *eptr,uint32_t type,uint32
 	return ptr;
 }
 
-static uint32_t labelmask = 0;
-
-void masterconn_parselabels(void) {
+uint8_t masterconn_parselabels(void) {
 	char *labelsstr,*p,c;
+	uint32_t mask;
+	uint8_t sep,perr;
+	uint32_t newlabelmask;
 
 	labelsstr = cfg_getstr("LABELS","");
-	labelmask = 0;
+	newlabelmask = 0;
 
+	perr = 0;
+	sep = 0;
 	for (p=labelsstr ; *p ; p++) {
 		c = *p;
 		if (c>='A' && c<='Z') {
-			labelmask |= (1 << (c-'A'));
+			mask = (1<<(c-'A'));
 		} else if (c>='a' && c<='z') {
-			labelmask |= (1 << (c-'a'));
+			mask = (1<<(c-'a'));
+		} else {
+			mask = 0;
 		}
+		if (mask) { // letter
+			if (sep) {
+				syslog(LOG_NOTICE,"LABELS: separator not found before label %c",c);
+				perr = 1;
+			} else {
+				sep = 1;
+			}
+			if (newlabelmask & mask) {
+				syslog(LOG_NOTICE,"LABELS: found duplicate label %c",c);
+				perr = 1;
+			}
+			newlabelmask |= mask;
+		} else if (c==',' || c==';') {
+			if (sep) {
+				sep = 0;
+			} else {
+				if (newlabelmask!=0) {
+					syslog(LOG_NOTICE,"LABELS: more than one separator found");
+				} else {
+					syslog(LOG_NOTICE,"LABELS: found separator at the beginning of definition");
+				}
+				perr = 1;
+			}
+		} else if (c!=' ' && c!='\t') {
+			syslog(LOG_NOTICE,"LABELS: unrecognized character %c",c);
+			perr = 1;
+		}
+	}
+	if (sep==0 && newlabelmask!=0) {
+		syslog(LOG_NOTICE,"LABELS: found separator at the end of definition");
+		perr = 1;
+	}
+
+	if (perr) {
+		syslog(LOG_NOTICE,"in the current version of chunkserver the only correct LABELS format is a set of letters separated by ',' or ';' - please change your config file appropriately");
 	}
 
 	free(labelsstr);
+
+	if (newlabelmask!=LabelMask) {
+		LabelMask = newlabelmask;
+		return 1;
+	}
+	return 0;
 }
 
 void masterconn_sendlabels(masterconn *eptr) {
 	uint8_t *buff;
 
 	buff = masterconn_create_attached_packet(eptr,CSTOMA_LABELS,4);
-	put32bit(&buff,labelmask);
+	put32bit(&buff,LabelMask);
 }
 
 void masterconn_sendregister(masterconn *eptr) {
@@ -400,14 +453,14 @@ void masterconn_sendchunksinfo(masterconn *eptr) {
 	syslog(LOG_NOTICE,"register ver. %u - chunks info",(unsigned int)((eptr->new_register_mode)?6:5));
 #endif
 	hdd_get_chunks_begin(0);
-	while ((chunks = hdd_get_chunks_next_list_count())) {
+	while ((chunks = hdd_get_chunks_next_list_count(ChunksPerRegisterPacket))) {
 		buff = masterconn_create_attached_packet(eptr,CSTOMA_REGISTER,1+chunks*(8+4));
 		if (eptr->new_register_mode) {
 			put8bit(&buff,61);
 		} else {
 			put8bit(&buff,51);
 		}
-		hdd_get_chunks_next_list_data(buff);
+		hdd_get_chunks_next_list_data(ChunksPerRegisterPacket,buff);
 	}
 	hdd_get_chunks_end();
 	if (eptr->new_register_mode) {
@@ -435,7 +488,7 @@ void masterconn_sendchunksinfo(masterconn *eptr) {
 void masterconn_sendnextchunks(masterconn *eptr) {
 	uint8_t *buff;
 	uint32_t chunks;
-	chunks = hdd_get_chunks_next_list_count();
+	chunks = hdd_get_chunks_next_list_count(ChunksPerRegisterPacket);
 	if (chunks==0) {
 		hdd_get_chunks_end();
 		buff = masterconn_create_attached_packet(eptr,CSTOMA_REGISTER,1);
@@ -444,7 +497,7 @@ void masterconn_sendnextchunks(masterconn *eptr) {
 	} else {
 		buff = masterconn_create_attached_packet(eptr,CSTOMA_REGISTER,1+chunks*(8+4));
 		put8bit(&buff,61);
-		hdd_get_chunks_next_list_data(buff);
+		hdd_get_chunks_next_list_data(ChunksPerRegisterPacket,buff);
 	}
 }
 
@@ -684,13 +737,13 @@ void masterconn_heavyload(uint32_t load,uint8_t hlstatus) {
 			hltosend = hlstatus;
 			rebalance = hdd_is_rebalance_on();
 			if (rebalance&2) { // in high speed rebalance force 'overloaded' status
-				hltosend = 2;
+				hltosend = HLSTATUS_OVERLOADED;
 			}
-			if (hlstatus!=2 && (rebalance&1)) { // not overloaded and in low speed rebalance - send 'rebalance' status
-				hltosend = 3;
+			if (hlstatus!=HLSTATUS_OVERLOADED && (rebalance&1)) { // not overloaded and in low speed rebalance - send 'rebalance' status
+				hltosend = HLSTATUS_REBALANCE;
 			}
-			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==3) { // does master know about 'rebalance' status? if not then send 'overloaded'
-				hltosend = 2;
+			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==HLSTATUS_REBALANCE) { // does master know about 'rebalance' status? if not then send 'overloaded'
+				hltosend = HLSTATUS_OVERLOADED;
 			}
 			buff = masterconn_create_attached_packet(eptr,CSTOMA_CURRENT_LOAD,5);
 			put32bit(&buff,load);
@@ -723,7 +776,13 @@ void masterconn_check_hdd_reports(void) {
 	masterconn *eptr = masterconnsingleton;
 	uint32_t errorcounter;
 	uint32_t chunkcounter;
-	uint8_t *buff;
+	uint8_t *buffl,*buffn,*buffd;
+
+	if (reconnectisneeded) {
+		masterconn_send_disconnect_command(); // closes connection
+		eptr->masteraddrvalid = 0;
+		reconnectisneeded = 0;
+	}
 	if (eptr->registerstate==REGISTERED && eptr->mode==DATA) {
 		errorcounter = hdd_errorcounter();
 		while (errorcounter) {
@@ -732,24 +791,32 @@ void masterconn_check_hdd_reports(void) {
 		}
 		chunkcounter = hdd_get_damaged_chunk_count();	// lock
 		if (chunkcounter) {
-			buff = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_DAMAGED,8*chunkcounter);
-			hdd_get_damaged_chunk_data(buff);	// unlock
+			buffd = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_DAMAGED,8*chunkcounter);
+			hdd_get_damaged_chunk_data(buffd);	// fill and unlock
 		} else {
-			hdd_get_damaged_chunk_data(NULL);
+			hdd_get_damaged_chunk_data(NULL); // just unlock
 		}
 		chunkcounter = hdd_get_lost_chunk_count(LOSTCHUNKLIMIT);	// lock
 		if (chunkcounter) {
-			buff = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_LOST,8*chunkcounter);
-			hdd_get_lost_chunk_data(buff,LOSTCHUNKLIMIT);	// unlock
+			buffl = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_LOST,8*chunkcounter);
+			hdd_get_lost_chunk_data(buffl,LOSTCHUNKLIMIT);	// fill and unlock
 		} else {
-			hdd_get_lost_chunk_data(NULL,0);
+			hdd_get_lost_chunk_data(NULL,0); // just unlock
 		}
 		chunkcounter = hdd_get_new_chunk_count(NEWCHUNKLIMIT);	// lock
 		if (chunkcounter) {
-			buff = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_NEW,12*chunkcounter);
-			hdd_get_new_chunk_data(buff,NEWCHUNKLIMIT);	// unlock
+			buffn = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_NEW,12*chunkcounter);
+			hdd_get_new_chunk_data(buffn,NEWCHUNKLIMIT);	// fill and unlock
 		} else {
-			hdd_get_new_chunk_data(NULL,0);
+			hdd_get_new_chunk_data(NULL,0); // just unlock
+		}
+		chunkcounter = hdd_get_changed_chunk_count(CHANGEDCHUNKLIMIT); // lock
+		if (chunkcounter) {
+			buffl = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_LOST,8*chunkcounter);
+			buffn = masterconn_create_attached_packet(eptr,CSTOMA_CHUNK_NEW,12*chunkcounter);
+			hdd_get_changed_chunk_data(buffl,buffn,CHANGEDCHUNKLIMIT); // fill and unlock
+		} else {
+			hdd_get_changed_chunk_data(NULL,NULL,0); // just unlock
 		}
 	}
 }
@@ -766,13 +833,13 @@ void masterconn_reportload(void) {
 			hltosend = eptr->hlstatus;
 			rebalance = hdd_is_rebalance_on();
 			if (rebalance&2) { // in high speed rebalance force 'overloaded' status
-				hltosend = 2;
+				hltosend = HLSTATUS_OVERLOADED;
 			}
-			if (hltosend!=2 && (rebalance&1)) { // not overloaded and in low speed rebalance - send 'rebalance' status
-				hltosend = 3;
+			if (hltosend!=HLSTATUS_OVERLOADED && (rebalance&1)) { // not overloaded and in low speed rebalance - send 'rebalance' status
+				hltosend = HLSTATUS_REBALANCE;
 			}
-			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==3) { // does master know about 'rebalance' status? if not then send 'overloaded'
-				hltosend = 2;
+			if (eptr->masterversion<VERSION2INT(3,0,62) && hltosend==HLSTATUS_REBALANCE) { // does master know about 'rebalance' status? if not then send 'overloaded'
+				hltosend = HLSTATUS_OVERLOADED;
 			}
 			buff = masterconn_create_attached_packet(eptr,CSTOMA_CURRENT_LOAD,5);
 			put32bit(&buff,load);
@@ -1617,7 +1684,7 @@ void masterconn_serve(struct pollfd *pdesc) {
 			}
 			masterconn_parse(eptr);
 		}
-		if ((eptr->mode==DATA || eptr->mode==CLOSE) && eptr->lastwrite+(eptr->timeout/3.0)<now && eptr->outputhead==NULL) {
+		if ((eptr->mode==DATA || eptr->mode==CLOSE) && eptr->lastwrite+1.0<now && eptr->outputhead==NULL) {
 			masterconn_create_attached_packet(eptr,ANTOAN_NOP,0);
 		}
 		if (eptr->pdescpos>=0) {
@@ -1635,6 +1702,10 @@ void masterconn_serve(struct pollfd *pdesc) {
 		eptr->mode = KILL;
 	}
 	masterconn_disconnection_check();
+}
+
+void masterconn_forcereconnect(void) {
+	reconnectisneeded = 1;
 }
 
 void masterconn_reconnect(void) {
@@ -1683,38 +1754,85 @@ void masterconn_term(void) {
 void masterconn_reload(void) {
 	masterconn *eptr = masterconnsingleton;
 	uint32_t ReconnectionDelay;
+	char *newAuthCode;
+	char *newMasterHost;
+	char *newMasterPort;
+	char *newBindHost;
+	uint32_t newTimeout;
 
-	if (AuthCode) {
-		free(AuthCode);
-		AuthCode = NULL;
+	ChunksPerRegisterPacket = cfg_getuint32("CHUNKS_PER_REGISTER_PACKET",10000);
+	if (ChunksPerRegisterPacket<1000) {
+		ChunksPerRegisterPacket = 1000;
 	}
+	if (ChunksPerRegisterPacket>100000) {
+		ChunksPerRegisterPacket = 100000;
+	}
+
 	if (cfg_isdefined("AUTH_CODE")) {
-		AuthCode = cfg_getstr("AUTH_CODE","");
+		newAuthCode = cfg_getstr("AUTH_CODE","");
+	} else {
+		newAuthCode = NULL;
 	}
 
-	free(MasterHost);
-	free(MasterPort);
-	free(BindHost);
+	if ((AuthCode==NULL && newAuthCode==NULL) || (AuthCode!=NULL && newAuthCode!=NULL && strcmp(AuthCode,newAuthCode)==0)) {
+		if (newAuthCode!=NULL) {
+			free(newAuthCode);
+		}
+	} else {
+		reconnectisneeded = 1;
+		if (AuthCode) {
+			free(AuthCode);
+			AuthCode = NULL;
+		}
+		AuthCode = newAuthCode;
+	}
 
-	MasterHost = cfg_getstr("MASTER_HOST",DEFAULT_MASTERNAME);
-	MasterPort = cfg_getstr("MASTER_PORT",DEFAULT_MASTER_CS_PORT);
-	BindHost = cfg_getstr("BIND_HOST","*");
+	newMasterHost = cfg_getstr("MASTER_HOST",DEFAULT_MASTERNAME);
+	newMasterPort = cfg_getstr("MASTER_PORT",DEFAULT_MASTER_CS_PORT);
+	newBindHost = cfg_getstr("BIND_HOST","*");
 
-	masterconn_send_disconnect_command(); // closes connection
-	eptr->masteraddrvalid = 0;
-	Timeout = cfg_getuint32("MASTER_TIMEOUT",0);
+	if (strcmp(newMasterHost,MasterHost)==0 && strcmp(newMasterPort,MasterPort)==0 && strcmp(newBindHost,BindHost)==0) {
+		free(newMasterHost);
+		free(newMasterPort);
+		free(newBindHost);
+	} else {
+		reconnectisneeded = 1;
+
+		free(MasterHost);
+		free(MasterPort);
+		free(BindHost);
+		MasterHost = newMasterHost;
+		MasterPort = newMasterPort;
+		BindHost = newBindHost;
+	}
 
 	ReconnectionDelay = cfg_getuint32("MASTER_RECONNECTION_DELAY",5);
-
-	if (Timeout>65535) {
-		Timeout=65535;
-	}
-	if (Timeout<10 && Timeout>0) {
-		Timeout=10;
-	}
-
 	main_time_change(reconnect_hook,ReconnectionDelay,0);
-	masterconn_parselabels();
+
+	newTimeout = cfg_getuint32("MASTER_TIMEOUT",0);
+
+	if (newTimeout>65535) {
+		newTimeout=65535;
+	}
+	if (newTimeout<10 && newTimeout>0) {
+		newTimeout=10;
+	}
+
+	if (newTimeout != Timeout) {
+		reconnectisneeded = 1;
+
+		Timeout = newTimeout;
+	}
+
+	if (masterconn_parselabels()) { // labels changed
+		if (reconnectisneeded==0) { // we don't want to restart connection
+			if (eptr && eptr->mode==DATA && eptr->registerstate==REGISTERED) {
+				masterconn_sendlabels(eptr);
+			} else {
+				reconnectisneeded = 1;
+			}
+		}
+	}
 }
 
 void masterconn_wantexit(void) {
@@ -1734,6 +1852,14 @@ int masterconn_init(void) {
 	masterconn_initcsid();
 
 	manager_time_hook = NULL;
+
+	ChunksPerRegisterPacket = cfg_getuint32("CHUNKS_PER_REGISTER_PACKET",10000);
+	if (ChunksPerRegisterPacket<1000) {
+		ChunksPerRegisterPacket = 1000;
+	}
+	if (ChunksPerRegisterPacket>100000) {
+		ChunksPerRegisterPacket = 100000;
+	}
 
 	if (cfg_isdefined("AUTH_CODE")) {
 		AuthCode = cfg_getstr("AUTH_CODE","");

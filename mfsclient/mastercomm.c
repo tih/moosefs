@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -67,9 +67,10 @@
 #include "heapsorter.h"
 #include "extrapackets.h"
 #include "massert.h"
-//#ifndef WIN32
-//#include "mfs_fuse.h"
-//#endif
+#ifdef MFSMOUNT
+#include "mfs_fuse.h"
+#include "mfsmount.h"
+#endif
 #include "chunksdatacache.h"
 //#include "readdata.h"
 // #include "dircache.h"
@@ -509,6 +510,26 @@ void fs_forget_entry(uint32_t inode) {
 		}
 	}
 	pthread_mutex_unlock(&aflock);
+}
+
+int fs_isopen(uint32_t inode) {
+	uint32_t afhash;
+	acquired_file *afptr;
+	pthread_mutex_lock(&aflock);
+	afhash = inode % ACQFILES_HASH_SIZE;
+	for (afptr = af_hash[afhash] ; afptr ; afptr = afptr->next) {
+		if (afptr->inode == inode) {
+			if (afptr->dentry || afptr->cnt) {
+				pthread_mutex_unlock(&aflock);
+				return 1;
+			} else {
+				pthread_mutex_unlock(&aflock);
+				return 0;
+			}
+		}
+	}
+	pthread_mutex_unlock(&aflock);
+	return 0;
 }
 
 void fs_inc_acnt(uint32_t inode) {
@@ -1304,7 +1325,9 @@ int fs_connect(uint8_t oninit,struct connect_args_t *cargs) {
 	uint32_t rootuid,rootgid,mapalluid,mapallgid;
 	uint8_t mingoal,maxgoal;
 	uint32_t mintrashtime,maxtrashtime;
+	uint32_t disables;
 	int32_t rleng;
+	const char* disablestr[]={DISABLE_STRINGS};
 	const char *sesflagposstrtab[]={SESFLAG_POS_STRINGS};
 	const char *sesflagnegstrtab[]={SESFLAG_NEG_STRINGS};
 #ifndef WIN32
@@ -1521,7 +1544,7 @@ int fs_connect(uint8_t oninit,struct connect_args_t *cargs) {
 			return -1;
 		}
 		i = get32bit(&rptr);
-		if (!(i==1 || i==4 || (cargs->meta && (i==19 || i==27)) || (cargs->meta==0 && (i==35 || i==43 || i==45)))) {
+		if (!(i==1 || i==4 || (cargs->meta && (i==19 || i==27)) || (cargs->meta==0 && (i==35 || i==43 || i==45 || i==49)))) {
 			if (oninit) {
 				fprintf(stderr,"got incorrect answer from mfsmaster\n");
 			} else {
@@ -1622,12 +1645,12 @@ int fs_connect(uint8_t oninit,struct connect_args_t *cargs) {
 	}
 	attrsize = (masterversion>=VERSION2INT(3,0,93))?ATTR_RECORD_SIZE:35;
 	sessionid = get32bit(&rptr);
-	if ((cargs->meta && i==27) || (cargs->meta==0 && (i==43 || i==45))) {
+	if ((cargs->meta && i==27) || (cargs->meta==0 && (i==43 || i==45 || i==49))) {
 		metaid = get64bit(&rptr);
 	}
 	sesflags = get8bit(&rptr);
 	if (!cargs->meta) {
-		if (i==45) {
+		if (i==45 || i==49) {
 			umaskval = get16bit(&rptr);
 		} else {
 			umaskval = 0;
@@ -1647,8 +1670,17 @@ int fs_connect(uint8_t oninit,struct connect_args_t *cargs) {
 	maxgoal = get8bit(&rptr);
 	mintrashtime = get32bit(&rptr);
 	maxtrashtime = get32bit(&rptr);
+	if (i==49) {
+		disables = get32bit(&rptr);
+	} else {
+		disables = 0;
+	}
 	free(regbuff);
 	lastwrite = monotonic_seconds();
+#ifdef MFSMOUNT
+	mfs_setdisables(disables);
+	main_setparams(sesflags,umaskval,rootuid,rootgid,mapalluid,mapallgid,mingoal,maxgoal,mintrashtime,maxtrashtime,disables);
+#endif
 	if (oninit==0) {
 		if (sessionlost==2) {
 			syslog(LOG_NOTICE,"registered to master using previous session");
@@ -1772,6 +1804,17 @@ int fs_connect(uint8_t oninit,struct connect_args_t *cargs) {
 					fprintf(stderr,"0s");
 				}
 				fprintf(stderr,")");
+			}
+		}
+		if (disables>0) {
+			int s;
+			fprintf(stderr," ; disabled commands: ");
+			s = 0;
+			for (i=0,j=1 ; disablestr[i]!=NULL ; i++,j<<=1) {
+				if (disables&j) {
+					fprintf(stderr,"%s%s",s?",":"",disablestr[i]);
+					s = 1;
+				}
 			}
 		}
 		fprintf(stderr,"\n");
@@ -3025,7 +3068,7 @@ uint8_t fs_setattr(uint32_t inode,uint8_t opened,uint32_t uid,uint32_t gids,uint
 	return ret;
 }
 
-uint8_t fs_truncate(uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gids,uint32_t *gid,uint64_t attrlength,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_truncate(uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gids,uint32_t *gid,uint64_t attrlength,uint8_t attr[ATTR_RECORD_SIZE],uint64_t *prevlength) {
 	uint8_t *wptr;
 	const uint8_t *rptr;
 	uint32_t i;
@@ -3069,14 +3112,24 @@ uint8_t fs_truncate(uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gids,uint
 		ret = MFS_ERROR_IO;
 	} else if (i==1) {
 		ret = rptr[0];
-	} else if (i!=asize) {
-		fs_disconnect();
-		ret = MFS_ERROR_IO;
-	} else {
+	} else if (i==asize) {
 		if (attr!=NULL) {
 			copy_attr(rptr,attr,asize);
 		}
 		ret = MFS_STATUS_OK;
+	} else if (i==(uint32_t)(asize+8)) {
+		if (prevlength!=NULL) {
+			*prevlength = get64bit(&rptr);
+		} else {
+			rptr+=8;
+		}
+		if (attr!=NULL) {
+			copy_attr(rptr,attr,asize);
+		}
+		ret = MFS_STATUS_OK;
+	} else {
+		fs_disconnect();
+		ret = MFS_ERROR_IO;
 	}
 	return ret;
 }
@@ -3654,7 +3707,7 @@ uint8_t fs_readdir(uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uint8
 	return ret;
 }
 
-uint8_t fs_create(uint32_t parent,uint8_t nleng,const uint8_t *name,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_create(uint32_t parent,uint8_t nleng,const uint8_t *name,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE],uint8_t *oflags) {
 	uint8_t *wptr;
 	const uint8_t *rptr;
 	uint32_t i;
@@ -3710,13 +3763,19 @@ uint8_t fs_create(uint32_t parent,uint8_t nleng,const uint8_t *name,uint16_t mod
 		ret = MFS_ERROR_IO;
 	} else if (i==1) {
 		ret = rptr[0];
-	} else if (i!=(uint32_t)(4+asize)) {
-		fs_disconnect();
-		ret = MFS_ERROR_IO;
-	} else {
+	} else if (i==(uint32_t)(4+asize)) {
+		*oflags = 0xFF;
 		*inode = get32bit(&rptr);
 		copy_attr(rptr,attr,asize);
 		ret = MFS_STATUS_OK;
+	} else if (i==(uint32_t)(5+asize)) {
+		*oflags = get8bit(&rptr);
+		*inode = get32bit(&rptr);
+		copy_attr(rptr,attr,asize);
+		ret = MFS_STATUS_OK;
+	} else {
+		fs_disconnect();
+		ret = MFS_ERROR_IO;
 	}
 	pthread_mutex_lock(&fdlock);
 	donotsendsustainedinodes = 0;
@@ -3724,7 +3783,7 @@ uint8_t fs_create(uint32_t parent,uint8_t nleng,const uint8_t *name,uint16_t mod
 	return ret;
 }
 
-uint8_t fs_opencheck(uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uint8_t flags,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_opencheck(uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uint8_t flags,uint8_t attr[ATTR_RECORD_SIZE],uint8_t *oflags) {
 	uint8_t *wptr;
 	const uint8_t *rptr;
 	uint32_t i;
@@ -3765,8 +3824,23 @@ uint8_t fs_opencheck(uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uin
 		if (attr) {
 			memset(attr,0,ATTR_RECORD_SIZE);
 		}
+		if (oflags) {
+			*oflags = 0xFF;
+		}
 		ret = rptr[0];
 	} else if (i==asize) {
+		if (attr) {
+			copy_attr(rptr,attr,asize);
+		}
+		if (oflags) {
+			*oflags = 0xFF;
+		}
+		ret = MFS_STATUS_OK;
+	} else if (i==(uint32_t)(1+asize)) {
+		if (oflags) {
+			*oflags = rptr[0];
+		}
+		rptr++;
 		if (attr) {
 			copy_attr(rptr,attr,asize);
 		}

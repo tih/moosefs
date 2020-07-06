@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -208,7 +208,7 @@
 	"Unknown MFS error"
 
 #define SCLASS_CHG_ADMIN_ONLY              0x0001
-#define SCLASS_CHG_CREATE_MODE             0x0002
+#define SCLASS_CHG_MODE                    0x0002
 #define SCLASS_CHG_CREATE_MASKS            0x0004
 #define SCLASS_CHG_KEEP_MASKS              0x0008
 #define SCLASS_CHG_ARCH_MASKS              0x0010
@@ -263,9 +263,15 @@
 #define LOOKUP_ACCESS_MODE_RX              0x0020
 #define LOOKUP_ACCESS_MODE_RW              0x0040
 #define LOOKUP_ACCESS_MODE_RWX             0x0080
-#define LOOKUP_ACCESS_BITS                 0x00FF
+#define LOOKUP_ACCESS_MODES_IO             0x00FC
+#define LOOKUP_ACCESS_MODES_RO             0xFF33
+#define LOOKUP_ACCESS_BITS                 0x38FF
 #define LOOKUP_CHUNK_ZERO_DATA             0x0100
 #define LOOKUP_RO_FILESYSTEM               0x0200
+#define LOOKUP_KEEPCACHE                   0x0400
+#define LOOKUP_IMMUTABLE                   0x0800
+#define LOOKUP_DIRECTMODE                  0x1000
+#define LOOKUP_APPENDONLY                  0x2000
 
 // combinations of MODE_MASK to LOOKUP_ACCESS_MODE
 #define MODE_TO_ACCMODE {0x01,0x03,0x05,0x0F,0x11,0x33,0x55,0xFF}
@@ -330,44 +336,56 @@
 #define GMODE_RECURSIVE                    1
 #define GMODE_ISVALID(x)                   (((uint32_t)(x))<=1)
 
-// create_mode:
+// mode (storage class):
 // loose = use other labels when servers are overloaded or full
 // std = use other labels when servers are full
 // strict = never use other labels
-#define CREATE_MODE_LOOSE                  0
-#define CREATE_MODE_STD                    1
-#define CREATE_MODE_STRICT                 2
+#define SCLASS_MODE_LOOSE                  0
+#define SCLASS_MODE_STD                    1
+#define SCLASS_MODE_STRICT                 2
 
 // extraattr:
 
-#define EATTR_BITS                         5
+#define EATTR_BITS                         8
 
 #define EATTR_NOOWNER                      0x01
 #define EATTR_NOACACHE                     0x02
 #define EATTR_NOECACHE                     0x04
 #define EATTR_NODATACACHE                  0x08
 #define EATTR_SNAPSHOT                     0x10
+#define EATTR_UNDELETABLE                  0x20
+#define EATTR_APPENDONLY                   0x40
+#define EATTR_IMMUTABLE                    0x80
 
 #define EATTR_STRINGS \
 	"noowner", \
 	"noattrcache", \
 	"noentrycache", \
 	"nodatacache", \
-	"snapshot"
+	"snapshot", \
+	"undeletable", \
+	"appendonly", \
+	"immutable"
 
 #define EATTR_DESCRIPTIONS \
 	"every user (except root) sees object as his (her) own", \
 	"prevent standard object attributes from being stored in kernel cache", \
 	"prevent directory entries from being stored in kernel cache", \
 	"prevent file data from being kept in kernel cache", \
-	"node was created using makesnapshot command (or inside snapshot)"
+	"node was created using makesnapshot command (or inside snapshot)", \
+	"prevent unlinking", \
+	"only appending to file and adding new nodes to directory is allowed", \
+	"prevent any change to object"
 
 // mode attr / attribute flags
 #define MATTR_NOACACHE                     0x01
 #define MATTR_NOECACHE                     0x02
+/* MATTR_ALLOWDATACACHE is deprecated - moved to open/lookup flags */
 #define MATTR_ALLOWDATACACHE               0x04
 #define MATTR_NOXATTR                      0x08
+/* MATTR_DIRECTMODE is deprecated - moved to open/lookup flags */
 #define MATTR_DIRECTMODE                   0x10
+#define MATTR_UNDELETABLE                  0x20
 
 // quota:
 #define QUOTA_FLAG_SINODES                 0x01
@@ -403,6 +421,7 @@
 #define TRUNCATE_FLAG_OPENED               0x01
 #define TRUNCATE_FLAG_UPDATE               0x02
 #define TRUNCATE_FLAG_TIMEFIX              0x04
+#define TRUNCATE_FLAG_RESERVE              0x08
 
 // register sesflags:
 #define SESFLAG_READONLY                   0x01	// meaning is obvious
@@ -467,11 +486,17 @@
 #define HLSTATUS_REBALANCE                 3
 #define HLSTATUS_GRACEFUL                  4
 
-// flags: "flags" fileld in "CLTOMA_FUSE_AQUIRE"
-#define WANT_READ                          1
-#define WANT_WRITE                         2
-#define AFTER_CREATE                       4
+// "flags" fileld in "CLTOMA_FUSE_OPEN"
+#define OPEN_READ                          0x01
+#define OPEN_WRITE                         0x02
+#define OPEN_AFTER_CREATE                  0x04
+#define OPEN_TRUNCATE                      0x08
+#define OPEN_CACHE_CLEARED                 0x10
 
+// "flags" field in "MATOCL_FUSE_OPEN/MATOCL_FUSE_CREATE"
+#define OPEN_KEEPCACHE                     0x01
+#define OPEN_DIRECTMODE                    0x02
+#define OPEN_APPENDONLY                    0x04
 
 #define MFS_XATTR_CREATE_OR_REPLACE        0
 #define MFS_XATTR_CREATE_ONLY              1
@@ -512,6 +537,86 @@
 
 
 #define ATTR_RECORD_SIZE                   36
+
+#define DISABLE_BIT_CHOWN                  0
+#define DISABLE_BIT_CHMOD                  1
+#define DISABLE_BIT_SYMLINK                2
+#define DISABLE_BIT_MKFIFO                 3
+#define DISABLE_BIT_MKDEV                  4
+#define DISABLE_BIT_MKSOCK                 5
+#define DISABLE_BIT_MKDIR                  6
+#define DISABLE_BIT_UNLINK                 7
+#define DISABLE_BIT_RMDIR                  8
+#define DISABLE_BIT_RENAME                 9
+#define DISABLE_BIT_MOVE                   10
+#define DISABLE_BIT_LINK                   11
+#define DISABLE_BIT_CREATE                 12
+#define DISABLE_BIT_READDIR                13
+#define DISABLE_BIT_READ                   14
+#define DISABLE_BIT_WRITE                  15
+#define DISABLE_BIT_TRUNCATE               16
+#define DISABLE_BIT_SETLENGTH              17
+#define DISABLE_BIT_APPENDCHUNKS           18
+#define DISABLE_BIT_SNAPSHOT               19
+#define DISABLE_BIT_SETTRASH               20
+#define DISABLE_BIT_SETSCLASS              21
+#define DISABLE_BIT_SETEATTR               22
+#define DISABLE_BIT_SETXATTR               23
+#define DISABLE_BIT_SETFACL                24
+
+#define DISABLE_CHOWN                      (UINT32_C(1)<<DISABLE_BIT_CHOWN)
+#define DISABLE_CHMOD                      (UINT32_C(1)<<DISABLE_BIT_CHMOD)
+#define DISABLE_SYMLINK                    (UINT32_C(1)<<DISABLE_BIT_SYMLINK)
+#define DISABLE_MKFIFO                     (UINT32_C(1)<<DISABLE_BIT_MKFIFO)
+#define DISABLE_MKDEV                      (UINT32_C(1)<<DISABLE_BIT_MKDEV)
+#define DISABLE_MKSOCK                     (UINT32_C(1)<<DISABLE_BIT_MKSOCK)
+#define DISABLE_MKDIR                      (UINT32_C(1)<<DISABLE_BIT_MKDIR)
+#define DISABLE_UNLINK                     (UINT32_C(1)<<DISABLE_BIT_UNLINK)
+#define DISABLE_RMDIR                      (UINT32_C(1)<<DISABLE_BIT_RMDIR)
+#define DISABLE_RENAME                     (UINT32_C(1)<<DISABLE_BIT_RENAME)
+#define DISABLE_MOVE                       (UINT32_C(1)<<DISABLE_BIT_MOVE)
+#define DISABLE_LINK                       (UINT32_C(1)<<DISABLE_BIT_LINK)
+#define DISABLE_CREATE                     (UINT32_C(1)<<DISABLE_BIT_CREATE)
+#define DISABLE_READDIR                    (UINT32_C(1)<<DISABLE_BIT_READDIR)
+#define DISABLE_READ                       (UINT32_C(1)<<DISABLE_BIT_READ)
+#define DISABLE_WRITE                      (UINT32_C(1)<<DISABLE_BIT_WRITE)
+#define DISABLE_TRUNCATE                   (UINT32_C(1)<<DISABLE_BIT_TRUNCATE)
+#define DISABLE_SETLENGTH                  (UINT32_C(1)<<DISABLE_BIT_SETLENGTH)
+#define DISABLE_APPENDCHUNKS               (UINT32_C(1)<<DISABLE_BIT_APPENDCHUNKS)
+#define DISABLE_SNAPSHOT                   (UINT32_C(1)<<DISABLE_BIT_SNAPSHOT)
+#define DISABLE_SETTRASH                   (UINT32_C(1)<<DISABLE_BIT_SETTRASH)
+#define DISABLE_SETSCLASS                  (UINT32_C(1)<<DISABLE_BIT_SETSCLASS)
+#define DISABLE_SETEATTR                   (UINT32_C(1)<<DISABLE_BIT_SETEATTR)
+#define DISABLE_SETXATTR                   (UINT32_C(1)<<DISABLE_BIT_SETXATTR)
+#define DISABLE_SETFACL                    (UINT32_C(1)<<DISABLE_BIT_SETFACL)
+
+#define DISABLE_STRINGS \
+	"chown", \
+	"chmod", \
+	"symlink", \
+	"mkfifo", \
+	"mkdev", \
+	"mksock", \
+	"mkdir", \
+	"unlink", \
+	"rmdir", \
+	"rename", \
+	"move", \
+	"link", \
+	"create", \
+	"readdir", \
+	"read", \
+	"write", \
+	"truncate", \
+	"setlength", \
+	"appendchunks", \
+	"snapshot", \
+	"settrash", \
+	"setsclass", \
+	"seteattr", \
+	"setxattr", \
+	"setfacl", \
+	NULL
 
 #define CSTOMA_MAXPACKETSIZE 500000000
 #define CLTOMA_MAXPACKETSIZE 50000000
@@ -816,17 +921,17 @@
 // Storage Class
 
 #define CLTOMA_SCLASS_CREATE (PROTO_BASE+350)
-// msgid:32 storage_class_name:NAME fver:8 admin_only:8 create_mode:8 arch_delay:16 create_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt:8 keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt:8 arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ]
+// msgid:32 storage_class_name:NAME fver:8 admin_only:8 mode:8 arch_delay:16 create_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt:8 keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt:8 arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ]
 
 #define MATOCL_SCLASS_CREATE (PROTO_BASE+351)
 // msgid:32 status:8
 
 #define CLTOMA_SCLASS_CHANGE (PROTO_BASE+352)
-// msgid:32 storage_class_name:NAME fver:8 chgmask:16 admin_only:8 create_mode:8 arch_delay:16 create_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt:8 keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt:8 arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ]
+// msgid:32 storage_class_name:NAME fver:8 chgmask:16 admin_only:8 mode:8 arch_delay:16 create_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt:8 keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt:8 arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ]
 
 #define MATOCL_SCLASS_CHANGE (PROTO_BASE+353)
 // msgid:32 status:8
-// msgid:32 fver:8 admin_only:8 create_mode:8 arch_delay:16 create_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt:8 keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt:8 arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ]
+// msgid:32 fver:8 admin_only:8 mode:8 arch_delay:16 create_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt:8 keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt:8 arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ]
 
 #define CLTOMA_SCLASS_DELETE (PROTO_BASE+354)
 // msgid:32 storage_class_name:NAME
@@ -854,7 +959,7 @@
 // fver==0:
 //	N * [ storage_class_name:NAME ]
 // fver!=0:
-//	N * [ storage_class_name:NAME admin_only:8 create_mode:8 arch_delay:16 create_labelscnt:8 keep_labelscnt:8 arch_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] ]
+//	N * [ storage_class_name:NAME admin_only:8 mode:8 arch_delay:16 create_labelscnt:8 keep_labelscnt:8 arch_labelscnt:8 create_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] keep_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] arch_labelscnt * [ MASKORGROUP * [ labelmask:32 ] ] ]
 
 
 // Fuse
@@ -920,6 +1025,7 @@
 //  version:32 sessionid:32 sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 ( version >= 1.6.26 )
 //  version:32 sessionid:32 metaid:64 sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 ( version >= 3.0.11 )
 //  version:32 sessionid:32 metaid:64 sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 ( version >= 3.0.72 )
+//  version:32 sessionid:32 metaid:64 sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 disables:32 ( version >= 3.0.112 )
 //  status:8
 
 #define REGISTER_RECONNECT 3
@@ -1119,7 +1225,8 @@
 // 0x01AF
 #define MATOCL_FUSE_OPEN (PROTO_BASE+431)
 // msgid:32 status:8
-// msgid:32 attr:ATTR
+// msgid:32 attr:ATTR (version < 3.0.113)
+// msgid:32 flags:8 attr:ATTR (version >= 3.0.113)
 
 // 0x01B0
 #define CLTOMA_FUSE_READ_CHUNK (PROTO_BASE+432)
@@ -1313,8 +1420,8 @@
 // 0x01D1
 #define MATOCL_FUSE_TRUNCATE (PROTO_BASE+465)
 // msgid:32 status:8
-// msgid:32 attr:ATTR
-
+// msgid:32 attr:ATTR (version < 3.0.113)
+// msgid:32 prevsize:64 attr:ATTR (version >= 3.0.113)
 
 // 0x01D2
 #define CLTOMA_FUSE_REPAIR (PROTO_BASE+466)
@@ -1418,7 +1525,8 @@
 // 0x01E3
 #define MATOCL_FUSE_CREATE (PROTO_BASE+483)
 // msgid:32 status:8
-// msgid:32 inode:32 attr:ATTR
+// msgid:32 inode:32 attr:ATTR (version < 3.0.113)
+// msgid:32 flags:8 inode:32 attr:ATTR (version >= 3.0.113)
 
 // 0x01E4
 #define CLTOMA_FUSE_PARENTS (PROTO_BASE+484)
@@ -1562,7 +1670,8 @@
 // stats:16 N*[ sessionid:32 ip:32 version:32 ileng:32 info:ilengB pleng:32 path:plengB sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 stats * [ current_statdata:32 ] stats * [ last_statdata:32 ] ] - vmode = 0 or empty and version > 1.6.21
 // stats:16 N*[ sessionid:32 ip:32 version:32 ileng:32 info:ilengB pleng:32 path:plengB sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 stats * [ current_statdata:32 ] stats * [ last_statdata:32 ] ] - vmode = 1 (valid since version 1.6.26)
 // stats:16 N*[ sessionid:32 ip:32 version:32 openfiles:32 nsocks:8 expire:32 ileng:32 info:ilengB pleng:32 path:plengB sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 stats * [ current_statdata:32 ] stats * [ last_statdata:32 ] ] - vmode = 2 (valid since version 1.7.8)
-// stats:16 N*[ sessionid:32 ip:32 version:32 openfiles:32 nsocks:8 expire:32 ileng:32 info:ilengB pleng:32 path:plengB sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 stats * [ current_statdata:32 ] stats * [ last_statdata:32 ] ] - vmode = 2 (valid since version 3.0.72)
+// stats:16 N*[ sessionid:32 ip:32 version:32 openfiles:32 nsocks:8 expire:32 ileng:32 info:ilengB pleng:32 path:plengB sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 stats * [ current_statdata:32 ] stats * [ last_statdata:32 ] ] - vmode = 3 (valid since version 3.0.72)
+// stats:16 N*[ sessionid:32 ip:32 version:32 openfiles:32 nsocks:8 expire:32 ileng:32 info:ilengB pleng:32 path:plengB sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 disables:32 stats * [ current_statdata:32 ] stats * [ last_statdata:32 ] ] - vmode = 4 (valid since version 3.0.112)
 
 
 // 0x01FE
@@ -1631,6 +1740,7 @@
 // N*[ fromip:32 toip:32 pleng:32 path:plengB version:32 extraflags:8 sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 ] - vmode = 0 (or not present)
 // N*[ fromip:32 toip:32 pleng:32 path:plengB version:32 extraflags:8 sesflags:8 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 ] - vmode = 1 (valid since version 1.6.26)
 // N*[ fromip:32 toip:32 pleng:32 path:plengB version:32 extraflags:8 sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 ] - vmode = 2 (valid since version 3.0.72)
+// N*[ fromip:32 toip:32 pleng:32 path:plengB version:32 extraflags:8 sesflags:8 umask:16 rootuid:32 rootgid:32 mapalluid:32 mapallgid:32 mingoal:8 maxgoal:8 mintrashtime:32 maxtrashtime:32 disables:32 ] - vmode = 3 (valid since version 3.0.112)
 
 
 // 0x020A
@@ -1731,7 +1841,7 @@
 
 // 0x021F
 #define MATOCL_SCLASS_INFO (PROTO_BASE+543)
-// allservers:16 N*[ sclassid:8 sclassname:NAME files:32 dirs:32 3 * [ stdchunks:64 archchunks:64 ] admin_only:8 create_mode:8 arch_delay:16 3 * [ canbefulfilled:8 labelscnt:8 ] 3 * [ labelscnt * [ MASKORGROUP * [ labelmask:32 ] matchingservers:16 ] ] ]
+// allservers:16 N*[ sclassid:8 sclassname:NAME files:32 dirs:32 3 * [ stdchunks:64 archchunks:64 ] admin_only:8 mode:8 arch_delay:16 3 * [ canbefulfilled:8 labelscnt:8 ] 3 * [ labelscnt * [ MASKORGROUP * [ labelmask:32 ] matchingservers:16 ] ] ]
 //  - redundancy classes (0 - undergoal ; 1 - ok ; 2 - overgoal)
 //  - label sets (0 - create ; 1 - keep ; 2 - archive)
 

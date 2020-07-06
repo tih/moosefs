@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -39,6 +39,9 @@ void hdd_get_lost_chunk_data(uint8_t *buff,uint32_t limit);
 uint32_t hdd_get_new_chunk_count(uint32_t limit);
 void hdd_get_new_chunk_data(uint8_t *buff,uint32_t limit);
 /* lock/unlock pair */
+uint32_t hdd_get_changed_chunk_count(uint32_t limit);
+void hdd_get_changed_chunk_data(uint8_t *buffl,uint8_t *buffn,uint32_t limit);
+/* lock/unlock pair */
 uint32_t hdd_diskinfo_size(void);
 void hdd_diskinfo_data(uint8_t *buff);
 uint32_t hdd_diskinfo_monotonic_size(void);
@@ -46,8 +49,8 @@ void hdd_diskinfo_monotonic_data(uint8_t *buff);
 /* lock/unlock pair */
 void hdd_get_chunks_begin(uint8_t partialmode);
 void hdd_get_chunks_end(void);
-uint32_t hdd_get_chunks_next_list_count();
-void hdd_get_chunks_next_list_data(uint8_t *buff);
+uint32_t hdd_get_chunks_next_list_count(uint32_t stopcount);
+void hdd_get_chunks_next_list_data(uint32_t stopcount,uint8_t *buff);
 //uint32_t hdd_get_chunks_count();
 //void hdd_get_chunks_data(uint8_t *buff);
 

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -80,6 +80,7 @@ void mfs_flock (fuse_req_t req, fuse_ino_t ino, struct fuse_file_info *fi, int o
 void mfs_readdirplus(fuse_req_t req, fuse_ino_t ino, size_t size, off_t off, struct fuse_file_info *fi);
 #endif
 
+void mfs_dentry_invalidate(uint32_t parent,uint8_t nleng,const char *name);
 void mfs_inode_clear_cache(uint32_t inode,uint64_t offset,uint64_t leng);
 void mfs_inode_change_fleng(uint32_t inode,uint64_t fleng);
 
@@ -87,12 +88,15 @@ void mfs_inode_change_fleng(uint32_t inode,uint64_t fleng);
 void mfs_freebsd_workarounds(int on);
 #endif
 
+void mfs_setdisables(uint32_t disables);
+
 void mfs_term(void);
-#ifdef HAVE_FUSE3
 void mfs_init (int debug_mode_in,int keep_cache_in,double direntry_cache_timeout_in,double entry_cache_timeout_in,double attr_cache_timeout_in,double xattr_cache_timeout_in,double groups_cache_timeout,int mkdir_copy_sgid_in,int sugid_clear_mode_in,int xattr_acl_support_in,double fsync_before_close_min_time_in,int no_xattrs_in,int no_posix_locks_in,int no_bsd_locks_in);
+
+#ifdef HAVE_FUSE3
 void mfs_setsession(struct fuse_session *se);
 #else /* FUSE2 */
-void mfs_init (struct fuse_chan *ch,int debug_mode_in,int keep_cache_in,double direntry_cache_timeout_in,double entry_cache_timeout_in,double attr_cache_timeout_in,double xattr_cache_timeout_in,double groups_cache_timeout,int mkdir_copy_sgid_in,int sugid_clear_mode_in,int xattr_acl_support_in,double fsync_before_close_min_time_in,int no_xattrs_in,int no_posix_locks_in,int no_bsd_locks_in);
+void mfs_setchan(struct fuse_chan *ch);
 #endif
 
 #endif

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -104,6 +104,7 @@ void xattr_removeinode(uint32_t inode) {
 	if (xe) {
 		xattr_cleanup_node(xe);
 		GLUE_FN_NAME_PREFIX(_delete)(xe);
+		free(xe);
 	}
 }
 
@@ -157,6 +158,7 @@ uint8_t xattr_setattr(uint32_t inode,uint8_t anleng,const uint8_t *attrname,uint
 					free(xp);
 					if (xe->pairhead==NULL) {
 						GLUE_FN_NAME_PREFIX(_delete)(xe);
+						free(xe);
 						fs_del_xattrflag(inode);
 					}
 					return MFS_STATUS_OK;

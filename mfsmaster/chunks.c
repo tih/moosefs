@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -128,7 +128,6 @@ typedef struct _discserv {
 
 static discserv *discservers = NULL;
 static discserv *discservers_next = NULL;
-static uint32_t discserverspos = 0;
 
 /*
 typedef struct _bcdata {
@@ -205,6 +204,7 @@ static uint64_t nextchunkid=1;
 
 typedef struct _csopchunk {
 	uint64_t chunkid;
+	uint8_t status;
 	struct _csopchunk *next;
 } csopchunk;
 
@@ -246,7 +246,8 @@ typedef struct _csdata {
 } csdata;
 
 static csdata *cstab = NULL;
-static uint32_t csfreehead = 0;
+static uint32_t csfreehead = MAXCSCOUNT;
+static uint32_t csfreetail = MAXCSCOUNT;
 static uint32_t csusedhead = MAXCSCOUNT;
 static uint32_t opsinprogress = 0;
 static uint16_t csregisterinprogress = 0;
@@ -280,6 +281,7 @@ static uint32_t MaxDelHardLimit;
 static double TmpMaxDelFrac;
 static uint32_t TmpMaxDel;
 static uint8_t ReplicationsRespectTopology;
+static uint32_t CreationsRespectTopology;
 static uint32_t LoopTimeMin;
 //static uint32_t HashSteps;
 static uint32_t HashCPTMax;
@@ -353,6 +355,17 @@ void mfsdebug_flush(void) {
 	mfsdebug(NULL);
 }
 #endif
+
+// input:
+//  - number of desired copies -> labelcnt
+//  - definition of desired labels -> labelmasks
+//  - number of available servers -> servcnt
+//  - pointers to servers -> servers
+// output:
+//  [0 .. labelscnt-1] -> matching server index (+labelcnt)
+//  [labelcnt .. labelcnt+servcnt-1] -> matching label definition
+// example:
+//   3,6,[A,A,A],[B,A,A,C,A,A] -> [4,5,7,-1,0,1,-1,2,-1,-1]
 
 int32_t* do_perfect_match(uint32_t labelcnt,uint32_t servcnt,uint32_t **labelmasks,uint16_t *servers) {
 	uint32_t s,i,l,x,v,vi,sp,rsp,sid,sids,gr;
@@ -1025,18 +1038,32 @@ void chunk_addopchunk(uint16_t csid,uint64_t chunkid) {
 	csopchunk *csop;
 	csop = malloc(sizeof(csopchunk));
 	csop->chunkid = chunkid;
+	csop->status = MFS_ERROR_MISMATCH;
 	csop->next = cstab[csid].opchunks;
 	cstab[csid].opchunks = csop;
 	opsinprogress++;
 	return;
 }
 
-void chunk_delopchunk(uint16_t csid,uint64_t chunkid) {
-	csopchunk **csopp,*csop;
+void chunk_statusopchunk(uint16_t csid,uint64_t chunkid,uint8_t status) {
+	csopchunk *csop;
+	for (csop=cstab[csid].opchunks ; csop!=NULL; csop=csop->next) {
+		if (csop->chunkid==chunkid) {
+			csop->status = status;
+			return;
+		}
+	}
+}
 
+uint8_t chunk_delopchunk(uint16_t csid,uint64_t chunkid) {
+	csopchunk **csopp,*csop;
+	uint8_t status;
+
+	status = MFS_ERROR_MISMATCH;
 	csopp = &(cstab[csid].opchunks);
 	while ((csop = (*csopp))) {
 		if (csop->chunkid == chunkid) {
+			status = csop->status;
 			*csopp = csop->next;
 			free(csop);
 			if (opsinprogress>0) {
@@ -1046,17 +1073,21 @@ void chunk_delopchunk(uint16_t csid,uint64_t chunkid) {
 			csopp = &(csop->next);
 		}
 	}
+	return status;
 }
 
-static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t sclassid,uint8_t *olflag) {
+static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t sclassid,uint8_t *olflag,uint32_t clientip) {
+	uint16_t tmpcsids[MAXCSCOUNT];
 	int32_t *matching;
 	uint32_t **labelmasks;
 	uint8_t labelcnt;
-	uint8_t create_mode;
+	uint8_t sclass_mode;
 	uint16_t servcount;
 	uint16_t goodlabelscount;
 	uint16_t overloaded;
 	uint32_t i,j;
+	uint32_t dist;
+	uint16_t cpos,fpos;
 	int32_t x;
 
 	servcount = matocsserv_getservers_wrandom(csids,&overloaded);
@@ -1064,7 +1095,7 @@ static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t
 		*olflag = (overloaded>0)?1:0;
 		return 0;
 	}
-	create_mode = sclass_get_create_mode(sclassid);
+	sclass_mode = sclass_get_mode(sclassid);
 	labelcnt = sclass_get_create_goal(sclassid);
 	if (servcount < labelcnt && servcount + overloaded >= labelcnt) {
 		*olflag = 1;
@@ -1072,6 +1103,28 @@ static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t
 	} else {
 		*olflag = 0;
 	}
+
+	if (CreationsRespectTopology>0) {
+		cpos = 0;
+		fpos = MAXCSCOUNT;
+		for (i=0 ; i<servcount ; i++) {
+			dist = topology_distance(matocsserv_server_get_ip(cstab[csids[i]].ptr),clientip);
+			if (dist < CreationsRespectTopology) { // close
+				tmpcsids[cpos++] = csids[i];
+			} else { // far
+				tmpcsids[--fpos] = csids[i];
+			}
+		}
+		if (cpos!=0 && fpos!=MAXCSCOUNT) {
+			for (i=0 ; i<cpos ; i++) {
+				csids[i] = tmpcsids[i];
+			}
+			for (i=fpos,j=servcount-1 ; i<MAXCSCOUNT ; i++,j--) {
+				csids[j] = tmpcsids[i];
+			}
+		}
+	}
+
 	if (sclass_has_create_labels(sclassid)) {
 		labelcnt = sclass_get_create_labelmasks(sclassid,&labelmasks);
 
@@ -1085,7 +1138,7 @@ static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t
 		// match servers to labels
 		matching = do_perfect_match(labelcnt,servcount,labelmasks,csids);
 
-		if (create_mode != CREATE_MODE_STRICT) {
+		if (sclass_mode != SCLASS_MODE_STRICT) {
 			goodlabelscount = 0;
 			// extend matching to fulfill goal
 			for (i=0 ; i<labelcnt ; i++) {
@@ -1105,7 +1158,7 @@ static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t
 				}
 			}
 
-			if (create_mode == CREATE_MODE_STD) {
+			if (sclass_mode == SCLASS_MODE_STD) {
 				if (goodlabelscount < labelcnt && goodlabelscount + overloaded >= labelcnt) {
 					*olflag = 1;
 					return 0;
@@ -1133,7 +1186,7 @@ static inline uint16_t chunk_creation_servers(uint16_t csids[MAXCSCOUNT],uint8_t
 				csids[j] = x;
 			}
 		}
-		if (create_mode == CREATE_MODE_STRICT) {
+		if (sclass_mode == SCLASS_MODE_STRICT) {
 			if (i < labelcnt && i + overloaded >= labelcnt) {
 				*olflag = 1;
 				return 0;
@@ -1167,7 +1220,7 @@ void chunk_emergency_increase_version(chunk *c) {
 		c->interrupted = 0;
 		c->operation = SET_VERSION;
 		c->version++;
-		changelog("%"PRIu32"|INCVERSION(%"PRIu64")",(uint32_t)main_time(),c->chunkid);
+		changelog("%"PRIu32"|SETVERSION(%"PRIu64",%"PRIu32")",(uint32_t)main_time(),c->chunkid,c->version);
 	} else {
 		matoclserv_chunk_status(c->chunkid,MFS_ERROR_CHUNKLOST);
 	}
@@ -1175,6 +1228,7 @@ void chunk_emergency_increase_version(chunk *c) {
 
 static inline int chunk_remove_disconnected_chunks(chunk *c) {
 	uint8_t opfinished,validcopies,disc;
+	uint8_t verfixed;
 	slist *s,**st;
 
 	if (discservers==NULL && discservers_next==NULL) {
@@ -1224,7 +1278,41 @@ static inline int chunk_remove_disconnected_chunks(chunk *c) {
 				validcopies=1;
 			}
 		}
+
+		if (opfinished && validcopies==0 && (c->operation==SET_VERSION || c->operation==TRUNCATE)) { // we know that version increase was just not completed, so all WVER chunks with version exactly one lower than chunk version are actually VALID copies
+			verfixed = 0;
+			for (s=c->slisthead ; s!=NULL ; s=s->next) {
+				if (s->version+1==c->version) {
+					if (s->valid==TDWVER) {
+						verfixed = 1;
+						s->valid = TDVALID;
+						chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies);
+						c->allvalidcopies++;
+					} else if (s->valid==WVER) {
+						verfixed = 1;
+						s->valid = VALID;
+						chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies+1);
+						c->allvalidcopies++;
+						c->regularvalidcopies++;
+					}
+				}
+				if (verfixed) {
+					c->version--;
+					changelog("%"PRIu32"|SETVERSION(%"PRIu64",%"PRIu32")",(uint32_t)main_time(),c->chunkid,c->version);
+				}
+			}
+			// we continue because we still want to return status not done to matoclserv module
+		}
+
 		if (opfinished) {
+			uint8_t nospace,status;
+			nospace = 1;
+			for (s=c->slisthead ; s ; s=s->next) {
+				status = chunk_delopchunk(s->csid,c->chunkid);
+				if (status!=MFS_ERROR_MISMATCH && status!=MFS_ERROR_NOSPACE) {
+					nospace = 0;
+				}
+			}
 			if (c->operation==REPLICATE) {
 				c->operation = NONE;
 				c->lockedto = 0;
@@ -1233,7 +1321,11 @@ static inline int chunk_remove_disconnected_chunks(chunk *c) {
 				if (validcopies) {
 					chunk_emergency_increase_version(c);
 				} else {
-					matoclserv_chunk_status(c->chunkid,MFS_ERROR_NOTDONE);
+					if (nospace) {
+						matoclserv_chunk_status(c->chunkid,MFS_ERROR_NOSPACE);
+					} else {
+						matoclserv_chunk_status(c->chunkid,MFS_ERROR_NOTDONE);
+					}
 					c->operation = NONE;
 				}
 			}
@@ -1567,7 +1659,7 @@ int chunk_read_check(uint32_t ts,uint64_t chunkid) {
 	return MFS_STATUS_OK;
 }
 
-int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *nchunkid,uint64_t ochunkid,uint8_t sclassid,uint8_t *opflag) {
+int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *nchunkid,uint64_t ochunkid,uint8_t sclassid,uint8_t *opflag,uint32_t clientip) {
 	uint16_t csids[MAXCSCOUNT];
 	static void **chosen = NULL;
 	static uint32_t chosenleng = 0;
@@ -1578,12 +1670,15 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 	uint32_t i;
 	chunk *oc,*c;
 	uint8_t csstable,csalldata;
+	uint8_t cschanges;
 
-	if (ts>(starttime+60) && csregisterinprogress==0) {
+	if (ts>(starttime+10) && csregisterinprogress==0) {
 		csstable = 1;
 	} else {
 		csstable = 0;
 	}
+
+	cschanges = (csstable==0 || (csreceivingchunks&2))?1:0;
 
 	if (chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		csalldata = 1;
@@ -1593,7 +1688,7 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 
 	if (ochunkid==0) {	// new chunk
 		if (mr==0) {
-			servcount = chunk_creation_servers(csids,sclassid,&overloaded);
+			servcount = chunk_creation_servers(csids,sclassid,&overloaded,clientip);
 			if (servcount==0) {
 				if (overloaded || csalldata==0) {
 					return MFS_ERROR_EAGAIN; // try again for ever
@@ -1669,7 +1764,7 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 				if (c->operation!=NONE) {
 					return MFS_ERROR_CHUNKBUSY;
 				}
-				if (csstable==0 || discservers!=NULL || discservers_next!=NULL || csreceivingchunks) {
+				if (cschanges) {
 					vc = 0;
 					for (s=c->slisthead ; s ; s=s->next) {
 						if (s->valid==VALID) {
@@ -1732,7 +1827,7 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 				if (oc->operation!=NONE) {
 					return MFS_ERROR_CHUNKBUSY;
 				}
-				if (csstable==0 || discservers!=NULL || discservers_next!=NULL || csreceivingchunks) {
+				if (cschanges) {
 					vc = 0;
 					for (os=oc->slisthead ; os ; os=os->next) {
 						if (os->valid==VALID) {
@@ -1799,12 +1894,12 @@ int chunk_univ_multi_modify(uint32_t ts,uint8_t mr,uint8_t continueop,uint64_t *
 	return MFS_STATUS_OK;
 }
 
-int chunk_multi_modify(uint8_t continueop,uint64_t *nchunkid,uint64_t ochunkid,uint8_t sclassid,uint8_t *opflag) {
-	return chunk_univ_multi_modify(main_time(),0,continueop,nchunkid,ochunkid,sclassid,opflag);
+int chunk_multi_modify(uint8_t continueop,uint64_t *nchunkid,uint64_t ochunkid,uint8_t sclassid,uint8_t *opflag,uint32_t clientip) {
+	return chunk_univ_multi_modify(main_time(),0,continueop,nchunkid,ochunkid,sclassid,opflag,clientip);
 }
 
 int chunk_mr_multi_modify(uint32_t ts,uint64_t *nchunkid,uint64_t ochunkid,uint8_t sclassid,uint8_t opflag) {
-	return chunk_univ_multi_modify(ts,1,0,nchunkid,ochunkid,sclassid,&opflag);
+	return chunk_univ_multi_modify(ts,1,0,nchunkid,ochunkid,sclassid,&opflag,0);
 }
 
 int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t ochunkid,uint32_t length,uint8_t sclassid) {
@@ -1812,13 +1907,16 @@ int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t
 	uint32_t i;
 	chunk *oc,*c;
 	uint8_t csstable,csalldata;
+	uint8_t cschanges;
 	uint32_t vc;
 
-	if (ts>(starttime+60) && csregisterinprogress==0) {
+	if (ts>(starttime+10) && csregisterinprogress==0) {
 		csstable = 1;
 	} else {
 		csstable = 0;
 	}
+
+	cschanges = (csstable==0 || (csreceivingchunks&2))?1:0;
 
 	if (chunk_counters_in_progress()==0 && csdb_have_all_servers()) {
 		csalldata = 1;
@@ -1847,7 +1945,7 @@ int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t
 			if (c->operation!=NONE) {
 				return MFS_ERROR_CHUNKBUSY;
 			}
-			if (csstable==0 || discservers!=NULL || discservers_next!=NULL || csreceivingchunks) {
+			if (cschanges) {
 				vc = 0;
 				for (os=oc->slisthead ; os ; os=os->next) {
 					if (os->valid==VALID) {
@@ -1903,7 +2001,7 @@ int chunk_univ_multi_truncate(uint32_t ts,uint8_t mr,uint64_t *nchunkid,uint64_t
 			if (oc->operation!=NONE) {
 				return MFS_ERROR_CHUNKBUSY;
 			}
-			if (csstable==0 || discservers!=NULL || discservers_next!=NULL || csreceivingchunks) {
+			if (cschanges) {
 				vc = 0;
 				for (os=oc->slisthead ; os ; os=os->next) {
 					if (os->valid==VALID) {
@@ -2483,9 +2581,6 @@ void chunk_lost(uint16_t csid,uint64_t chunkid) {
 	chunk *c;
 	slist **sptr,*s;
 
-	cstab[csid].lostchunkdelay = LOSTCHUNKDELAY;
-	csreceivingchunks |= 1;
-
 	c = chunk_find(chunkid);
 	if (c==NULL) {
 		return;
@@ -2508,6 +2603,10 @@ void chunk_lost(uint16_t csid,uint64_t chunkid) {
 			c->needverincrease = 1;
 			*sptr = s->next;
 			slist_free(s);
+
+			cstab[csid].lostchunkdelay = LOSTCHUNKDELAY;
+			csreceivingchunks |= 1;
+
 		} else {
 			sptr = &(s->next);
 		}
@@ -2539,6 +2638,7 @@ uint8_t chunk_get_mfrstatus(uint16_t csid) {
 }
 
 static inline void chunk_server_remove_csid(uint16_t csid) {
+	// remove from used list
 	if (cstab[csid].prev<MAXCSCOUNT) {
 		cstab[cstab[csid].prev].next = cstab[csid].next;
 	} else {
@@ -2547,22 +2647,31 @@ static inline void chunk_server_remove_csid(uint16_t csid) {
 	if (cstab[csid].next<MAXCSCOUNT) {
 		cstab[cstab[csid].next].prev = cstab[csid].prev;
 	}
-	cstab[csid].next = csfreehead;
-	cstab[csid].prev = MAXCSCOUNT;
-	csfreehead = csid;
+	// append to free list
+	cstab[csid].next = MAXCSCOUNT;
+	cstab[csid].prev = csfreetail;
+	cstab[csfreetail].next = csid;
+	csfreetail = csid;
+
+//	cstab[csid].next = csfreehead;
+//	cstab[csid].prev = MAXCSCOUNT;
+//	cstab[csfreehead].prev = csid;
+//	csfreehead = csid;
 }
 
 static inline uint16_t chunk_server_new_csid(void) {
 	uint16_t csid;
 
+	// take first element from free list
 	csid = csfreehead;
 	csfreehead = cstab[csid].next;
 	cstab[csfreehead].prev = MAXCSCOUNT;
+	// add to used list
 	if (csusedhead<MAXCSCOUNT) {
 		cstab[csusedhead].prev = csid;
 	}
 	cstab[csid].next = csusedhead;
-	cstab[csid].prev = MAXCSCOUNT;
+//	cstab[csid].prev = MAXCSCOUNT; // not necessary - it was first element in free list
 	csusedhead = csid;
 	return csid;
 }
@@ -2644,12 +2753,13 @@ void chunk_server_disconnection_loop(void) {
 	chunk *c,*cn;
 	discserv *ds;
 	uint64_t startutime,currutime;
+	static uint32_t discserverspos = 0;
 
 	if (discservers) {
 		startutime = monotonic_useconds();
 		currutime = startutime;
 		while (startutime+10000>currutime) {
-			for (i=0 ; i<1000 ; i++) {
+			for (i=0 ; i<100 ; i++) {
 				if (discserverspos<chunkrehashpos) {
 					for (c=chunkhashtab[discserverspos>>HASHTAB_LOBITS][discserverspos&HASHTAB_MASK] ; c ; c=cn ) {
 						cn = c->next;
@@ -2661,7 +2771,7 @@ void chunk_server_disconnection_loop(void) {
 						ds = discservers;
 						discservers = ds->next;
 						chunk_server_remove_csid(ds->csid);
-						matocsserv_disconnection_finished(cstab[csfreehead].ptr);
+						matocsserv_disconnection_finished(cstab[ds->csid].ptr);
 						free(ds);
 					}
 					return;
@@ -2840,7 +2950,8 @@ void chunk_got_replicate_status(uint16_t csid,uint64_t chunkid,uint32_t version,
 void chunk_operation_status(uint64_t chunkid,uint8_t status,uint16_t csid,uint8_t operation) {
 	chunk *c;
 	uint8_t opfinished,validcopies;
-	slist *s;
+	uint8_t verfixed;
+	slist *s,**st;
 
 	if (status==MFS_STATUS_OK) {
 		if (operation==CREATE) {
@@ -2883,9 +2994,11 @@ void chunk_operation_status(uint64_t chunkid,uint8_t status,uint16_t csid,uint8_
 		syslog(LOG_WARNING,"chunk %016"PRIX64"_%08"PRIX32" - got unexpected status (expected: %s ; got: %s)",chunkid,c->version,opstr[eop],opstr[sop]);
 	}
 
-	validcopies=0;
-	opfinished=1;
-	for (s=c->slisthead ; s ; s=s->next) {
+	validcopies = 0;
+	opfinished = 1;
+
+	st = &(c->slisthead);
+	while ((s=*st)!=NULL) {
 		if (s->csid == csid) {
 			if (status!=0) {
 				c->interrupted = 1;	// increase version after finish, just in case
@@ -2901,8 +3014,23 @@ void chunk_operation_status(uint64_t chunkid,uint8_t status,uint16_t csid,uint8_
 				if (c->writeinprogress && s->valid!=INVALID && s->valid!=DEL && s->valid!=WVER && s->valid!=TDWVER) {
 					 matocsserv_write_counters(cstab[s->csid].ptr,0);
 				}
-				s->valid = INVALID;
-				s->version = 0;	// after unfinished operation can't be shure what version chunk has
+				if (status==MFS_ERROR_NOTDONE) { // special case - this operation was not even started, so we know exact result
+					if (c->operation==SET_VERSION || c->operation==TRUNCATE) { // chunk left not changed, but now it has wrong version
+						if (s->valid==TDBUSY || s->valid==TDVALID) {
+							s->valid = TDWVER;
+						} else {
+							s->valid = WVER;
+						}
+						s->version--;
+					} else if (c->operation==CREATE || c->operation==DUPLICATE || c->operation==DUPTRUNC) { // copy not created
+						*st = s->next;
+						slist_free(s);
+						continue;
+					}
+				} else {
+					s->valid = INVALID;
+					s->version = 0;	// after unfinished operation can't be shure what version chunk has
+				}
 			} else {
 				if (s->valid==TDBUSY || s->valid==TDVALID) {
 					s->valid=TDVALID;
@@ -2910,7 +3038,8 @@ void chunk_operation_status(uint64_t chunkid,uint8_t status,uint16_t csid,uint8_
 					s->valid=VALID;
 				}
 			}
-			chunk_delopchunk(s->csid,c->chunkid);
+			chunk_statusopchunk(s->csid,c->chunkid,status);
+//			chunk_delopchunk(s->csid,c->chunkid);
 		}
 		if (s->valid==BUSY || s->valid==TDBUSY) {
 			opfinished=0;
@@ -2918,8 +3047,41 @@ void chunk_operation_status(uint64_t chunkid,uint8_t status,uint16_t csid,uint8_
 		if (s->valid==VALID || s->valid==TDVALID) {
 			validcopies=1;
 		}
+		st = &(s->next);
+	}
+	if (opfinished && validcopies==0 && (c->operation==SET_VERSION || c->operation==TRUNCATE)) { // we know that version increase was just not completed, so all WVER chunks with version exactly one lower than chunk version are actually VALID copies
+		verfixed = 0;
+		for (s=c->slisthead ; s!=NULL ; s=s->next) {
+			if (s->version+1==c->version) {
+				if (s->valid==TDWVER) {
+					verfixed = 1;
+					s->valid = TDVALID;
+					chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies);
+					c->allvalidcopies++;
+				} else if (s->valid==WVER) {
+					verfixed = 1;
+					s->valid = VALID;
+					chunk_state_change(c->sclassid,c->sclassid,c->archflag,c->archflag,c->allvalidcopies,c->allvalidcopies+1,c->regularvalidcopies,c->regularvalidcopies+1);
+					c->allvalidcopies++;
+					c->regularvalidcopies++;
+				}
+			}
+			if (verfixed) {
+				c->version--;
+				changelog("%"PRIu32"|SETVERSION(%"PRIu64",%"PRIu32")",(uint32_t)main_time(),c->chunkid,c->version);
+			}
+		}
+		// we continue because we still want to return status not done to matoclserv module
 	}
 	if (opfinished) {
+		uint8_t nospace;
+		nospace = 1;
+		for (s=c->slisthead ; s ; s=s->next) {
+			status = chunk_delopchunk(s->csid,chunkid);
+			if (status!=MFS_ERROR_MISMATCH && status!=MFS_ERROR_NOSPACE) {
+				nospace = 0;
+			}
+		}
 		if (validcopies) {
 //			syslog(LOG_NOTICE,"operation finished, chunk: %016"PRIX64" ; op: %s ; interrupted: %u",c->chunkid,opstr[c->operation],c->interrupted);
 			if (c->interrupted) {
@@ -2933,7 +3095,11 @@ void chunk_operation_status(uint64_t chunkid,uint8_t status,uint16_t csid,uint8_
 				}
 			}
 		} else {
-			matoclserv_chunk_status(c->chunkid,MFS_ERROR_NOTDONE);
+			if (nospace) {
+				matoclserv_chunk_status(c->chunkid,MFS_ERROR_NOSPACE);
+			} else {
+				matoclserv_chunk_status(c->chunkid,MFS_ERROR_NOTDONE);
+			}
 			c->operation = NONE;
 		}
 	}
@@ -3163,10 +3329,12 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 //	static uint16_t *bcsids;
 //	static uint16_t bservcount;
 	static uint16_t *rcsids = NULL;
+	uint16_t servmaxpos[4];
 	uint16_t rservcount;
 	uint16_t srccsid,dstcsid;
 	double repl_read_counter;
 	uint16_t i,j,k;
+	uint16_t prilevel;
 	uint32_t vc,tdc,ivc,bc,tdb,dc,wvc,tdw;
 	uint32_t goal;
 	static loop_info inforec;
@@ -3522,7 +3690,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 					if (c->operation!=NONE) {
 						syslog(LOG_NOTICE,"chunk %016"PRIX64"_%08"PRIX32": can't replicate chunk - operation %s in progress",c->chunkid,c->version,opstr[c->operation]);
 					} else {
-						syslog(LOG_NOTICE,"chunk %016"PRIX64"_%08"PRIX32": can't replicate chunk - locked to: %"PRIu32,c->chunkid,c->version,c->lockedto);
+						syslog(LOG_NOTICE,"chunk %016"PRIX64"_%08"PRIX32": can't replicate chunk - chunk is being modified (locked for next %"PRIu32" second%s)",c->chunkid,c->version,(uint32_t)(1+c->lockedto-now),(c->lockedto==now)?"":"s");
 					}
 				}
 			}
@@ -3724,32 +3892,31 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 //		if ((csdb_getdisconnecttime()+ReplicationsDelayDisconnect)<now) {
 			uint32_t rgvc,rgtdc;
 			uint32_t lclass;
-			uint8_t allservflag;
 
 			if (vc+tdc==1 && goal>2) { // highest priority - chunks with only one copy and high goal
-				j = DPRIORITY_ENDANGERED_HIGHGOAL;
+				prilevel = DPRIORITY_ENDANGERED_HIGHGOAL;
 				lclass = 0;
 			} else if (vc+tdc==1 && goal==2) { // next priority - chunks with only one copy
-				j = DPRIORITY_ENDANGERED;
+				prilevel = DPRIORITY_ENDANGERED;
 				lclass = 0;
 			} else if (vc==1 && tdc>0) { // next priority - chunks on one regular disk and some "marked for removal" disks
-				j = DPRIORITY_UNDERGOAL_MFR;
+				prilevel = DPRIORITY_UNDERGOAL_MFR;
 				lclass = 1;
 			} else if (tdc>0) { // next priority - chunks on "marked for removal" disks
-				j = DPRIORITY_MFR;
+				prilevel = DPRIORITY_MFR;
 				lclass = 1;
 			} else if (vc < goal) { // next priority - standard undergoal chunks
-				j = DPRIORITY_UNDERGOAL;
+				prilevel = DPRIORITY_UNDERGOAL;
 				lclass = 1;
 			} else { // lowest priority - wrong labeled chunks
-				j = DPRIORITY_WRONGLABEL;
+				prilevel = DPRIORITY_WRONGLABEL;
 				lclass = 1;
 			}
 			if (extrajob==0) {
-				for (i=0 ; i<j ; i++) {
+				for (i=0 ; i<prilevel ; i++) {
 					if (chunks_priority_leng[i]>0) { // we have chunks with higher priority than current chunk
-						chunk_priority_enqueue(j,c); // in such case only enqueue this chunk for future processing
-						if (j<5) {
+						chunk_priority_enqueue(prilevel,c); // in such case only enqueue this chunk for future processing
+						if (prilevel<DPRIORITY_WRONGLABEL) {
 							inforec.notdone.copy_undergoal++;
 						} else {
 							inforec.notdone.copy_wronglabels++;
@@ -3758,7 +3925,15 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 					}
 				}
 			}
-			rservcount = matocsserv_getservers_lessrepl(rcsids,MaxWriteRepl[lclass],(j<2)?1:0,&allservflag);
+
+			matocsserv_get_server_groups(rcsids,MaxWriteRepl[lclass],servmaxpos);
+			// rservcount = number of servers that are allowed to start new replication
+			if (prilevel<DPRIORITY_UNDERGOAL_MFR) {
+				rservcount = servmaxpos[CSSTATE_OVERLOADED];
+			} else {
+				rservcount = servmaxpos[CSSTATE_OK];
+			}
+//			rservcount = matocsserv_getservers_lessrepl(rcsids,MaxWriteRepl[lclass],(j<DPRIORITY_UNDERGOAL_MFR)?1:0,&allservflag);
 			rgvc=0;
 			rgtdc=0;
 			vripcnt=0;
@@ -3786,10 +3961,27 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 			}
 			if (rgvc+rgtdc>0 && rservcount>0) { // have at least one server to read from and at least one to write to
 				if ((DoNotUseSameIP | DoNotUseSameRack | LabelUniqueMask) || sclass_has_keeparch_labels(c->sclassid,c->archflag)) { // labels version
-					uint32_t dstservcnt;
-					uint8_t allowallservers;
+					uint8_t sclass_mode;
+					uint16_t maxlimited;
+					uint16_t dstservcnt;
 					// reverse order - do_perfect_match matches servers 'from right' - this is important when ReplicationsRespectTopology>1
 					servcnt = 0;
+					// first set all servers with limited write replication counter
+					for (i=servmaxpos[CSSTATE_OVERLOADED] ; i<servmaxpos[CSSTATE_LIMIT_REACHED] ; i++) {
+						for (s=c->slisthead ; s && s->csid!=rcsids[i] ; s=s->next) {}
+						if (s==NULL) {
+							servers[servcnt++] = rcsids[i];
+						}
+					}
+					// then add overloaded servers (but only when they are not already included in rservcount)
+					for (i=rservcount ; i<servmaxpos[CSSTATE_OVERLOADED] ; i++) {
+						for (s=c->slisthead ; s && s->csid!=rcsids[i] ; s=s->next) {}
+						if (s==NULL) {
+							servers[servcnt++] = rcsids[i];
+						}
+					}
+					maxlimited = servcnt;
+					// then all valid servers in reverse order (matching from the 'right')
 					for (i=0 ; i<rservcount ; i++) {
 						for (s=c->slisthead ; s && s->csid!=rcsids[rservcount-1-i] ; s=s->next) {}
 						if (s==NULL) {
@@ -3803,7 +3995,50 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 						}
 					}
 					labelcnt = sclass_get_keeparch_labelmasks(c->sclassid,c->archflag,&labelmasks);
+					sclass_mode = sclass_get_mode(c->sclassid);
 					matching = do_perfect_match(labelcnt,servcnt,labelmasks,servers);
+					for (i=0 ; i<labelcnt ; i++) {
+						int32_t servpos;
+						if (matching[i]<(int32_t)labelcnt) {
+							servpos=-1;
+						} else {
+							servpos=matching[i]-labelcnt;
+						}
+//						syslog(LOG_NOTICE,"labelpos: %u ; serverpos: %d ; serverip: %s ; serverlabels: %s",i,servpos,matocsserv_getstrip(cstab[servers[servpos]].ptr),matocsserv_server_get_labelstr(cstab[servers[servpos]].ptr));
+						if (servpos<0) { // matched but only on 'no space' server (or totally unmatched)
+							if (sclass_mode==SCLASS_MODE_STRICT) {
+								canbefixed = 0;
+							} else { // all other modes - labels matched to 'no space' servers only can be replicated anywhere
+								for (j=maxlimited ; j<dstservcnt ; j++) { // check all possibe destination servers
+									if (matching[j+labelcnt]<0) { // matched to label? - if not then we can use it
+//										syslog(LOG_NOTICE,"replicate to first available server (STD MODE and LOOSE MODE)");
+										if (chunk_undergoal_replicate(c, servers[j], now, lclass, prilevel, &inforec, rgvc, rgtdc)>=0) {
+											return;
+										}
+									}
+								}
+							}
+						} else if (servpos<maxlimited) { // matched but only on 'busy' server
+							if (sclass_mode==SCLASS_MODE_STRICT) {
+								canbefixed = 0;
+							} else if (sclass_mode==SCLASS_MODE_LOOSE) { // in loose mode labels matched only to overloaded servers
+								for (j=maxlimited ; j<dstservcnt ; j++) { // check all possibe destination servers
+									if (matching[j+labelcnt]<0) { // matched to label? - if not then we can use it
+//										syslog(LOG_NOTICE,"replicate to first available server (LOOSE MODE)");
+										if (chunk_undergoal_replicate(c, servers[j], now, lclass, prilevel, &inforec, rgvc, rgtdc)>=0) {
+											return;
+										}
+									}
+								}
+							} // in standard mode - we leave matching and then do not perform replication
+						} else if (servpos<dstservcnt) { // can be replicated to correct label
+//							syslog(LOG_NOTICE,"replicate to correct label (all modes)");
+							if (chunk_undergoal_replicate(c, servers[servpos], now, lclass, prilevel, &inforec, rgvc, rgtdc)>=0) {
+								return;
+							}
+						}
+					}
+/*
 					allowallservers = 0;
 					if (scount<=rservcount) { // all servers can accept replication
 						uint32_t unmatchedlabels;
@@ -3825,6 +4060,7 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 							}
 						}
 					}
+*/
 /*
 					if (vc < sclass_getgoal(c->sclassid) && csdb_servers_count()<=rservcount) { // all servers can accept replications
 						for (i=0 ; i<labelcnt ; i++) {
@@ -3834,29 +4070,31 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 						}
 					}
 */
-					for (i=0 ; i<dstservcnt && canbefixed ; i++) {
+/*					for (i=0 ; i<dstservcnt && canbefixed ; i++) {
 						if (matching[i+labelcnt]>=0 || allowallservers) {
-							if (chunk_undergoal_replicate(c, servers[i], now, lclass, j, &inforec, rgvc, rgtdc)>=0) {
+							if (chunk_undergoal_replicate(c, servers[i], now, lclass, prilevel, &inforec, rgvc, rgtdc)>=0) {
 								return;
 							}
 						}
 					}
+*/
 				} else { // classic goal version
-					if (goal>scount && vc==scount) {
+					if (goal>servmaxpos[CSSTATE_LIMIT_REACHED] && vc==servmaxpos[CSSTATE_LIMIT_REACHED]) {
 						canbefixed = 0;
-					}
-					for (i=0 ; i<rservcount ; i++) {
-						for (s=c->slisthead ; s && s->csid!=rcsids[i] ; s=s->next) {}
-						if (!s) {
-							if (chunk_undergoal_replicate(c, rcsids[i], now, lclass, j, &inforec, rgvc, rgtdc)>=0) {
-								return;
+					} else {
+						for (i=0 ; i<rservcount ; i++) {
+							for (s=c->slisthead ; s && s->csid!=rcsids[i] ; s=s->next) {}
+							if (!s) {
+								if (chunk_undergoal_replicate(c, rcsids[i], now, lclass, prilevel, &inforec, rgvc, rgtdc)>=0) {
+									return;
+								}
 							}
 						}
 					}
 				}
 			}
-			if (canbefixed && allservflag==0) { // enqueue only chunks which can be fixed and only if there are servers which reached replication limits
-				chunk_priority_enqueue(j,c);
+			if (canbefixed) { // enqueue only chunks which can be fixed and only if there are servers which reached replication limits
+				chunk_priority_enqueue(prilevel,c);
 			}
 		}
 		if (vc < goal) {
@@ -3896,6 +4134,11 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 
 	if (goal == vc && vc+tdc>0) {
 		double maxdiff;
+		uint8_t sclass_mode;
+		uint8_t need_label_version;
+
+//		need_label_version = ((DoNotUseSameIP | DoNotUseSameRack | LabelUniqueMask) || sclass_has_keeparch_labels(c->sclassid,c->archflag))?1:0;
+		need_label_version = sclass_has_keeparch_labels(c->sclassid,c->archflag)?1:0;
 
 		servcnt = 0;
 		for (s=c->slisthead ; s ; s=s->next) {
@@ -3909,8 +4152,17 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 				servers[extraservcnt++] = s->csid;
 			}
 		}
-		labelcnt = sclass_get_keeparch_labelmasks(c->sclassid,c->archflag,&labelmasks);
-		matching = do_perfect_match(labelcnt,servcnt,labelmasks,servers);
+
+		if (need_label_version) {
+			labelcnt = sclass_get_keeparch_labelmasks(c->sclassid,c->archflag,&labelmasks);
+			sclass_mode = sclass_get_mode(c->sclassid);
+			matching = do_perfect_match(labelcnt,servcnt,labelmasks,servers);
+		} else {
+			// set something to silence potential compiler warnings
+			labelcnt = goal;
+			sclass_mode = SCLASS_MODE_LOOSE;
+			matching = NULL;
+		}
 
 		if (dservcount==0) {
 			dservcount = matocsserv_getservers_ordered(dcsids);
@@ -3922,41 +4174,76 @@ void chunk_do_jobs(chunk *c,uint16_t scount,uint16_t fullservers,uint32_t now,ui
 
 		for (i=0 ; i<servcnt ; i++) {
 			uint32_t *labelmask;
-			uint8_t unmatched;
+			uint8_t anyunmatched;
 			double srcusage,dstusage;
 			uint8_t lclass;
 
-			if (matching[labelcnt+i]>=0) {
-				labelmask = labelmasks[matching[labelcnt+i]];
-				unmatched = 0;
-			} else {
-				labelmask = NULL;
-				unmatched = 1;
+			labelmask = NULL;
+			anyunmatched = 0;
+			if (need_label_version) {
+				if (matching[labelcnt+i]>=0) {
+					labelmask = labelmasks[matching[labelcnt+i]];
+				} else if (sclass_mode!=SCLASS_MODE_LOOSE) {
+					anyunmatched = 1;
+					// in normal and strict mode you can use any definition that do not match any copy (it will even fix wrong labels)
+				}
 			}
 			srcusage = matocsserv_get_usage(cstab[servers[i]].ptr);
 			repl_read_counter = matocsserv_replication_read_counter(cstab[servers[i]].ptr,now);
 			if (repl_read_counter < MaxReadRepl[2] || repl_read_counter < MaxReadRepl[3]) { // here accept any rebalance limit
 				for (j=0 ; j<dservcount ; j++) {
-					for (k=0 ; k<extraservcnt && servers[k]!=dcsids[j] ; k++) { }
-					if (k==extraservcnt) { // not one of copies
-						dstusage = matocsserv_get_usage(cstab[dcsids[j]].ptr);
-						if (srcusage - dstusage < maxdiff) {
+					dstusage = matocsserv_get_usage(cstab[dcsids[j]].ptr);
+					if (srcusage - dstusage < maxdiff) { // already found better src,dst pair
+						break;
+					}
+					if (((srcusage - dstusage) <= AcceptableDifference) && last_rebalance+(0.01/(srcusage-dstusage))>=now) { // when difference is small then do not hurry
+						break;
+					}
+					k = 0;
+					while (k<extraservcnt) {
+						if (servers[k]==dcsids[j]) {
 							break;
 						}
-						if (((srcusage - dstusage) <= AcceptableDifference) && last_rebalance+(0.01/(srcusage-dstusage))>=now) {
+						if (DoNotUseSameIP) {
+							if (matocsserv_server_get_ip(cstab[servers[k]].ptr)==matocsserv_server_get_ip(cstab[dcsids[j]].ptr)) {
+								break;
+							}
+						} else if (DoNotUseSameRack) {
+							if (topology_get_rackid(matocsserv_server_get_ip(cstab[servers[k]].ptr))==topology_get_rackid(matocsserv_server_get_ip(cstab[dcsids[j]].ptr))) {
+								break;
+							}
+						} else if (LabelUniqueMask) {
+							if ((matocsserv_server_get_labelmask(cstab[servers[k]].ptr) & LabelUniqueMask) == (matocsserv_server_get_labelmask(cstab[dcsids[j]].ptr) & LabelUniqueMask)) {
+								break;
+							}
+						}
+						k++;
+					}
+					if (k<extraservcnt) { // one of existing copies is on this server or this server has same IP/RACKID/UNIQLABELS
+						continue;
+					}
+					if (anyunmatched) { // check if this server match any of unmatched labels
+						for (k=0 ; k<labelcnt ; k++) {
+							if (matching[k]<0) {
+								if (matocsserv_server_has_labels(cstab[dcsids[j]].ptr,labelmasks[k])) {
+									break;
+								}
+							}
+						}
+						if (k==labelcnt) { // nope
 							break;
 						}
-						if (unmatched || matocsserv_server_has_labels(cstab[dcsids[j]].ptr,labelmask)) {
-							if ((srcusage - dstusage) > AcceptableDifference*1.5) { // now we know usage difference, so we can set proper limit class
-								lclass = 3;
-							} else {
-								lclass = 2;
-							}
-							if (repl_read_counter < MaxReadRepl[lclass] && matocsserv_replication_write_counter(cstab[dcsids[j]].ptr,now)<MaxWriteRepl[lclass]) {
-								maxdiff = srcusage - dstusage;
-								dstcsid = dcsids[j];
-								srccsid = servers[i];
-							}
+					}
+					if (labelmask==NULL || matocsserv_server_has_labels(cstab[dcsids[j]].ptr,labelmask)) { // if we have specific label then check if this server has them
+						if ((srcusage - dstusage) > AcceptableDifference*1.5) { // now we know usage difference, so we can set proper limit class
+							lclass = 3;
+						} else {
+							lclass = 2;
+						}
+						if (repl_read_counter < MaxReadRepl[lclass] && matocsserv_replication_write_counter(cstab[dcsids[j]].ptr,now)<MaxWriteRepl[lclass]) {
+							maxdiff = srcusage - dstusage;
+							dstcsid = dcsids[j];
+							srccsid = servers[i];
 						}
 					}
 				}
@@ -4114,6 +4401,7 @@ void chunk_jobs_main(void) {
 		return;
 	}
 
+	// full servers are not included here
 	scount = matocsserv_servers_count();
 
 	if (scount==0 || chunkrehashpos==0) {
@@ -4394,6 +4682,7 @@ void chunk_cleanup(void) {
 	}
 	cstab[0].prev = MAXCSCOUNT;
 	csfreehead = 0;
+	csfreetail = MAXCSCOUNT-1;
 	csusedhead = MAXCSCOUNT;
 	for (i=0 ; i<MAXSCLASS*2 ; i++) {
 		for (j=0 ; j<11 ; j++) {
@@ -4480,6 +4769,7 @@ void chunk_load_cfg_common(void) {
 
 	ReplicationsDelayInit = cfg_getuint32("REPLICATIONS_DELAY_INIT",60);
 	ReplicationsRespectTopology = cfg_getuint8("REPLICATIONS_RESPECT_TOPOLOGY",0);
+	CreationsRespectTopology = cfg_getuint32("CREATIONS_RESPECT_TOPOLOGY",0);
 
 	if (cfg_isdefined("ACCEPTABLE_PERCENTAGE_DIFFERENCE")) {
 		AcceptableDifference = cfg_getdouble("ACCEPTABLE_PERCENTAGE_DIFFERENCE",1.0)/100.0; // 1%
@@ -4737,6 +5027,7 @@ int chunk_strinit(void) {
 	}
 	cstab[0].prev = MAXCSCOUNT;
 	csfreehead = 0;
+	csfreetail = MAXCSCOUNT-1;
 	csusedhead = MAXCSCOUNT;
 	allchunkcounts = malloc(sizeof(uint32_t*)*MAXSCLASS*2);
 	passert(allchunkcounts);

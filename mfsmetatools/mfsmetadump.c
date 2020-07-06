@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -41,8 +41,14 @@ const char id[]="@(#) version: " VERSSTR ", written by Jakub Kruszona-Zawadzki";
 
 #define MAXSCLASSNLENG 256
 
+static int hide_nonprintable = 0;
+
 static inline char dispchar(uint8_t c) {
-	return (c>=32 && c<=126)?c:'.';
+	if (hide_nonprintable) {
+		return (c>=32 && c<=126)?c:'.';
+	} else {
+		return c;
+	}
 }
 
 static inline void makestrip(char strip[16],uint32_t ip) {
@@ -57,9 +63,11 @@ void print_name(FILE *in,uint32_t nleng) {
 	while (nleng>0) {
 		y = (nleng>1024)?1024:nleng;
 		x = fread(buff,1,y,in);
-		for (i=0 ; i<x ; i++) {
-			if (buff[i]<32 || buff[i]>127) {
-				buff[i]='.';
+		if (hide_nonprintable) {
+			for (i=0 ; i<x ; i++) {
+				if (buff[i]<32 || buff[i]>127) {
+					buff[i]='.';
+				}
 			}
 		}
 		happy = fwrite(buff,1,x,stdout);
@@ -624,7 +632,7 @@ int posix_acl_load(FILE *fd,uint8_t mver) {
 	uint16_t aclperm;
 	uint32_t acls,acbcnt;
 
-	if (mver>0x10) {
+	if (mver>0x11) {
 		fprintf(stderr,"loading posix_acl: unsupported format\n");
 		return -1;
 	}
@@ -687,12 +695,13 @@ int sessions_load(FILE *fd,uint8_t mver) {
 	uint32_t recsize;
 	uint32_t i,nextsessionid,sessionid;
 	uint32_t ileng,peerip,rootinode,mintrashtime,maxtrashtime,rootuid,rootgid,mapalluid,mapallgid,disconnected;
+	uint32_t disables;
 	uint16_t umaskval;
 	uint64_t exportscsum;
 	uint8_t sesflags,mingoal,maxgoal;
 	char strip[16];
 
-	if (mver>0x14) {
+	if (mver>0x15) {
 		fprintf(stderr,"loading sessions: unsupported format\n");
 		return -1;
 	}
@@ -732,8 +741,10 @@ int sessions_load(FILE *fd,uint8_t mver) {
 		recsize = 47+statsinfile*8;
 	} else if (mver<0x14) {
 		recsize = 55+statsinfile*8;
-	} else {
+	} else if (mver<0x15) {
 		recsize = 57+statsinfile*8;
+	} else {
+		recsize = 61+statsinfile*8;
 	}
 	fsesrecord = malloc(recsize);
 	if (fsesrecord==NULL) {
@@ -775,13 +786,20 @@ int sessions_load(FILE *fd,uint8_t mver) {
 		rootgid = get32bit(&ptr);
 		mapalluid = get32bit(&ptr);
 		mapallgid = get32bit(&ptr);
+		if (mver>=0x15) {
+			disables = get32bit(&ptr);
+		} else {
+			disables = 0;
+		}
 		makestrip(strip,peerip);
 		if (mver>=0x11) {
 			disconnected = get32bit(&ptr);
 		} else {
 			disconnected = 0;
 		}
-		if (mver>=0x14) {
+		if (mver>=0x15) {
+			printf("SESSION|s:%10"PRIu32"|e:#%"PRIu64"|p:%s|r:%10"PRIu32"|f:0x%02"PRIX8"|u:0%03"PRIo16"|g:%"PRIu8"-%"PRIu8"|t:%10"PRIu32"-%10"PRIu32"|m:%10"PRIu32",%10"PRIu32",%10"PRIu32",%10"PRIu32"|x:0x%08"PRIX32"|d:%10"PRIu32"|c:",sessionid,exportscsum,strip,rootinode,sesflags,umaskval,mingoal,maxgoal,mintrashtime,maxtrashtime,rootuid,rootgid,mapalluid,mapallgid,disables,disconnected);
+		} else if (mver>=0x14) {
 			printf("SESSION|s:%10"PRIu32"|e:#%"PRIu64"|p:%s|r:%10"PRIu32"|f:0x%02"PRIX8"|u:0%03"PRIo16"|g:%"PRIu8"-%"PRIu8"|t:%10"PRIu32"-%10"PRIu32"|m:%10"PRIu32",%10"PRIu32",%10"PRIu32",%10"PRIu32"|d:%10"PRIu32"|c:",sessionid,exportscsum,strip,rootinode,sesflags,umaskval,mingoal,maxgoal,mintrashtime,maxtrashtime,rootuid,rootgid,mapalluid,mapallgid,disconnected);
 		} else if (mver>=0x13) {
 			printf("SESSION|s:%10"PRIu32"|e:#%"PRIu64"|p:%s|r:%10"PRIu32"|f:%02"PRIX8"|g:%"PRIu8"-%"PRIu8"|t:%10"PRIu32"-%10"PRIu32"|m:%10"PRIu32",%10"PRIu32",%10"PRIu32",%10"PRIu32"|d:%10"PRIu32"|c:",sessionid,exportscsum,strip,rootinode,sesflags,mingoal,maxgoal,mintrashtime,maxtrashtime,rootuid,rootgid,mapalluid,mapallgid,disconnected);
@@ -790,14 +808,18 @@ int sessions_load(FILE *fd,uint8_t mver) {
 		} else {
 			printf("SESSION|s:%10"PRIu32"|p:%s|r:%10"PRIu32"|f:%02"PRIX8"|g:%"PRIu8"-%"PRIu8"|t:%10"PRIu32"-%10"PRIu32"|m:%10"PRIu32",%10"PRIu32",%10"PRIu32",%10"PRIu32"|c:",sessionid,strip,rootinode,sesflags,mingoal,maxgoal,mintrashtime,maxtrashtime,rootuid,rootgid,mapalluid,mapallgid);
 		}
-		for (i=0 ; i<statsinfile ; i++) {
-			printf("%c%"PRIu32,(i==0)?'[':',',get32bit(&ptr));
+		if (statsinfile==0) {
+			printf("[]|l:[]|i:");
+		} else {
+			for (i=0 ; i<statsinfile ; i++) {
+				printf("%c%"PRIu32,(i==0)?'[':',',get32bit(&ptr));
+			}
+			printf("]|l:");
+			for (i=0 ; i<statsinfile ; i++) {
+				printf("%c%"PRIu32,(i==0)?'[':',',get32bit(&ptr));
+			}
+			printf("]|i:");
 		}
-		printf("]|l:");
-		for (i=0 ; i<statsinfile ; i++) {
-			printf("%c%"PRIu32,(i==0)?'[':',',get32bit(&ptr));
-		}
-		printf("]|i:");
 		print_name(fd,ileng);
 		printf("\n");
 	}
@@ -1000,7 +1022,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 	uint32_t chunkcount;
 	uint16_t sclassid;
 	uint16_t arch_delay;
-	uint8_t create_mode;
+	uint8_t mode;
 	uint8_t admin_only;
 	uint8_t nleng;
 	uint8_t name[MAXSCLASSNLENG];
@@ -1058,7 +1080,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 		if (mver>0x15) {
 			nleng = get8bit(&ptr);
 			admin_only = get8bit(&ptr);
-			create_mode = get8bit(&ptr);
+			mode = get8bit(&ptr);
 			arch_delay = get16bit(&ptr);
 			create_labelscnt = get8bit(&ptr);
 			keep_labelscnt = get8bit(&ptr);
@@ -1067,7 +1089,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 		} else if (mver>0x14) {
 			nleng = 0;
 			admin_only = 0;
-			create_mode = get8bit(&ptr);
+			mode = get8bit(&ptr);
 			arch_delay = get16bit(&ptr);
 			create_labelscnt = get8bit(&ptr);
 			keep_labelscnt = get8bit(&ptr);
@@ -1076,7 +1098,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 		} else if (mver>0x13) {
 			nleng = 0;
 			admin_only = 0;
-			create_mode = get8bit(&ptr);
+			mode = get8bit(&ptr);
 			create_labelscnt = get8bit(&ptr);
 			keep_labelscnt = get8bit(&ptr);
 			arch_labelscnt = keep_labelscnt;
@@ -1088,7 +1110,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 			create_labelscnt = get8bit(&ptr);
 			keep_labelscnt = create_labelscnt;
 			arch_labelscnt = create_labelscnt;
-			create_mode = CREATE_MODE_STD;
+			mode = SCLASS_MODE_STD;
 			arch_delay = 0;
 			if (mver==0x12) {
 				chunkcount = get32bit(&ptr);
@@ -1108,7 +1130,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 			break;
 		}
 		if (create_labelscnt==0 || create_labelscnt>9 || keep_labelscnt==0 || keep_labelscnt>9 || arch_labelscnt==0 || arch_labelscnt>9) {
-			fprintf(stderr,"loading labelset: data format error (sclassid: %"PRIu16" ; create_mode: %"PRIu8" ; create_labelscnt: %"PRIu8" ; keep_labelscnt: %"PRIu8" ; arch_labelscnt: %"PRIu8" ; arch_delay: %"PRIu16")\n",sclassid,create_mode,create_labelscnt,keep_labelscnt,arch_labelscnt,arch_delay);
+			fprintf(stderr,"loading labelset: data format error (sclassid: %"PRIu16" ; mode: %"PRIu8" ; create_labelscnt: %"PRIu8" ; keep_labelscnt: %"PRIu8" ; arch_labelscnt: %"PRIu8" ; arch_delay: %"PRIu16")\n",sclassid,mode,create_labelscnt,keep_labelscnt,arch_labelscnt,arch_delay);
 			free(databuff);
 			databuff=NULL;
 			return -1;
@@ -1139,7 +1161,7 @@ int labelset_load(FILE *fd,uint8_t mver) {
 			fseek(fd,chunkcount*8,SEEK_CUR);
 		}
 		ptr = databuff;
-		printf("SCLASS|#:%5"PRIu16"|x:%u|m:%u|d:%5"PRIu16,sclassid,admin_only,create_mode,arch_delay);
+		printf("SCLASS|#:%5"PRIu16"|x:%u|m:%u|d:%5"PRIu16,sclassid,admin_only,mode,arch_delay);
 		if (mver<=0x13) {
 			printf("|c+k+a: ");
 		} else {
@@ -1289,7 +1311,7 @@ int fs_load(FILE *fd,uint8_t fver,const char section[4]) {
 		ptr = hdr+8;
 		sleng = get64bit(&ptr);
 		offbegin = ftello(fd);
-		if (section==0 || memcmp(hdr,section,4)==0) {
+		if (section[0]==0 || memcmp(hdr,section,4)==0) {
 			printf("# -------------------------------------------------------------------\n");
 			printf("# section header: %c%c%c%c%c%c%c%c (%02X%02X%02X%02X%02X%02X%02X%02X) ; length: %"PRIu64"\n",dispchar(hdr[0]),dispchar(hdr[1]),dispchar(hdr[2]),dispchar(hdr[3]),dispchar(hdr[4]),dispchar(hdr[5]),dispchar(hdr[6]),dispchar(hdr[7]),hdr[0],hdr[1],hdr[2],hdr[3],hdr[4],hdr[5],hdr[6],hdr[7],sleng);
 			mver = (((hdr[5]-'0')&0xF)<<4)+(hdr[7]&0xF);
@@ -1442,7 +1464,10 @@ int fs_loadall(const char *fname,const char section[4]) {
 
 void usage(const char *appname) {
 //	printf("usage: %s [-f J|C[separator]] [-o outputfile] [-a sum_name] metadata.mfs PATH ...\n",appname);
-	printf("usage: %s [-s section to dump] metadata.mfs\n",appname);
+	printf("usage: %s [-d] [-s section to dump] metadata.mfs\n",appname);
+	printf("options:\n");
+	printf("\td: print dot instead of non printable characters\n");
+	printf("\ts: dump only given section\n");
 	printf("section names:\n");
 	printf("\tHEAD - header info\n");
 	printf("\tSESS - client sessions\n");
@@ -1470,7 +1495,7 @@ int main(int argc,char *argv[]) {
 	appname = argv[0];
 	memset(section,0,4);
 
-	while ((ch=getopt(argc,argv,"s:"))>=0) {
+	while ((ch=getopt(argc,argv,"s:d"))>=0) {
 		switch(ch) {
 			case 's':
 				if (strlen(optarg)!=4) {
@@ -1478,6 +1503,9 @@ int main(int argc,char *argv[]) {
 					usage(appname);
 				}
 				memcpy(section,optarg,4);
+				break;
+			case 'd':
+				hide_nonprintable = 1;
 				break;
 			default:
 				usage(appname);
@@ -1496,5 +1524,5 @@ int main(int argc,char *argv[]) {
 //		printf("usage: %s metadata_file\n",argv[0]);
 //		return 1;
 //	}
-	return (fs_loadall(argv[1],section)<0)?1:0;
+	return (fs_loadall(argv[0],section)<0)?1:0;
 }

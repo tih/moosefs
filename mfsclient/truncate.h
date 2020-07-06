@@ -18,11 +18,11 @@
  * or visit http://www.gnu.org/licenses/gpl-2.0.html
  */
 
-#ifndef _CHARTSDATA_H_
-#define _CHARTSDATA_H_
+#ifndef _TRUNCATE_H_
+#define _TRUNCATE_H_
 
 #include <inttypes.h>
 
-int chartsdata_init (void);
+uint8_t do_truncate(uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gids,uint32_t *gid,uint64_t attrlength,uint8_t attr[ATTR_RECORD_SIZE],uint64_t *prevlength);
 
 #endif

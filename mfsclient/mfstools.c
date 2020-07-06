@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -280,7 +280,7 @@ void print_number(const char *prefix,const char *suffix,uint64_t number,uint8_t 
 	}
 }
 
-int my_get_number(const char *str,uint64_t *ret,double max,uint8_t bytesflag) {
+int my_get_number(const char *str,uint64_t *ret,uint64_t max,uint8_t bytesflag) {
 	uint64_t val,frac,fracdiv;
 	double drval,mult;
 	int f;
@@ -360,10 +360,9 @@ int my_get_number(const char *str,uint64_t *ret,double max,uint8_t bytesflag) {
 		return -1;
 	}
 	drval = round(((double)frac/(double)fracdiv+(double)val)*mult);
-	if (drval>max) {
+	*ret = drval;
+	if (drval>max || ((*ret)==0 && drval>1.0)) { // when max==UINT64_MAX and drval==2^64 then drval>max is false because common type for uint64_t and double is double and we lost precision here - therefore the second condition
 		return -2;
-	} else {
-		*ret = drval;
 	}
 	return 1;
 }
@@ -652,7 +651,7 @@ int file_paths(const char* fname) {
 
 typedef struct _storage_class {
 	uint8_t admin_only;
-	uint8_t create_mode;
+	uint8_t mode;
 	uint16_t arch_delay;
 	uint8_t create_labelscnt,keep_labelscnt,arch_labelscnt;
 	uint32_t create_labelmasks[9][MASKORGROUP];
@@ -663,7 +662,7 @@ typedef struct _storage_class {
 static inline int deserialize_sc(storage_class *sc) {
 	uint8_t i,og;
 	sc->admin_only = master_get8bit();
-	sc->create_mode = master_get8bit();
+	sc->mode = master_get8bit();
 	sc->arch_delay = master_get16bit();
 	sc->create_labelscnt = master_get8bit();
 	sc->keep_labelscnt = master_get8bit();
@@ -692,7 +691,7 @@ static inline int deserialize_sc(storage_class *sc) {
 static inline void serialize_sc(const storage_class *sc) {
 	uint8_t i,og;
 	master_put8bit(sc->admin_only);
-	master_put8bit(sc->create_mode);
+	master_put8bit(sc->mode);
 	master_put16bit(sc->arch_delay);
 	master_put8bit(sc->create_labelscnt);
 	master_put8bit(sc->keep_labelscnt);
@@ -723,7 +722,7 @@ static inline void printf_sc(const storage_class *sc,char *endstr) {
 			printf("%"PRIu8"->%"PRIu8,sc->create_labelscnt,sc->keep_labelscnt);
 		}
 		printf(" ; admin_only: %s",(sc->admin_only)?"YES":"NO");
-		printf(" ; create_mode: %s",(sc->create_mode==CREATE_MODE_LOOSE)?"LOOSE":(sc->create_mode==CREATE_MODE_STRICT)?"STRICT":"STD");
+		printf(" ; mode: %s",(sc->mode==SCLASS_MODE_LOOSE)?"LOOSE":(sc->mode==SCLASS_MODE_STRICT)?"STRICT":"STD");
 		printf(" ; create_labels: %s",make_label_expr(labelsbuff,sc->create_labelscnt,(uint32_t (*)[MASKORGROUP])sc->create_labelmasks));
 		printf(" ; keep_labels: %s",make_label_expr(labelsbuff,sc->keep_labelscnt,(uint32_t (*)[MASKORGROUP])sc->keep_labelmasks));
 	} else {
@@ -733,7 +732,7 @@ static inline void printf_sc(const storage_class *sc,char *endstr) {
 			printf("%"PRIu8"->%"PRIu8"->%"PRIu8,sc->create_labelscnt,sc->keep_labelscnt,sc->arch_labelscnt);
 		}
 		printf(" ; admin_only: %s",(sc->admin_only)?"YES":"NO");
-		printf(" ; create_mode: %s",(sc->create_mode==CREATE_MODE_LOOSE)?"LOOSE":(sc->create_mode==CREATE_MODE_STRICT)?"STRICT":"STD");
+		printf(" ; mode: %s",(sc->mode==SCLASS_MODE_LOOSE)?"LOOSE":(sc->mode==SCLASS_MODE_STRICT)?"STRICT":"STD");
 		printf(" ; create_labels: %s",make_label_expr(labelsbuff,sc->create_labelscnt,(uint32_t (*)[MASKORGROUP])sc->create_labelmasks));
 		printf(" ; keep_labels: %s",make_label_expr(labelsbuff,sc->keep_labelscnt,(uint32_t (*)[MASKORGROUP])sc->keep_labelmasks));
 		printf(" ; arch_labels: %s",make_label_expr(labelsbuff,sc->arch_labelscnt,(uint32_t (*)[MASKORGROUP])sc->arch_labelmasks));
@@ -1151,6 +1150,7 @@ int set_eattr(const char *fname,uint8_t eattr,uint8_t mode) {
 		return -1;
 	}
 	uid = getuid();
+	master_new_packet();
 	master_put32bit(inode);
 	master_put32bit(uid);
 	master_put8bit(eattr);
@@ -1195,6 +1195,7 @@ int archive_control(const char *fname,uint8_t archcmd) {
 		return -1;
 	}
 	uid = getuid();
+	master_new_packet();
 	master_put32bit(inode);
 	master_put8bit(archcmd);
 	if (archcmd!=ARCHCTL_GET) {
@@ -1357,7 +1358,7 @@ int change_sc(const char *mfsmp,const char *scname,uint16_t chgmask,storage_clas
 
 int show_sc(const char *mfsmp,const char *scname) {
 	storage_class sc;
-
+	memset(&sc,0,sizeof(storage_class));
 	return change_sc(mfsmp,scname,0,&sc);
 }
 
@@ -3091,18 +3092,18 @@ void usage(int f) {
 		case MFSMVSC:
 		case MFSLSSC:
 			fprintf(stderr,"mfs storage class admin tool\n\nusage:\n");
-			fprintf(stderr,"\tmfsscadmin [/mountpoint] create|make [-a admin_only] [-m create_mode] [-C create_labels] -K keep_labels [-A archive_labels -d archive_delay] sclass [sclass ...]\n");
-			fprintf(stderr,"\tmfsscadmin [/mountpoint] create|make [-a admin_only] [-m create_mode] LABELS sclass [sclass ...]\n");
-			fprintf(stderr,"\tmfsscadmin [/mountpoint] modify|change [-f] [-a admin_only] [-m create_mode] [-C create_labels] [-K keep_labels] [-A archive_labels] [-d archive_delay] sclass [sclass ...]\n");
+			fprintf(stderr,"\tmfsscadmin [/mountpoint] create|make [-a admin_only] [-m mode] [-C create_labels] -K keep_labels [-A archive_labels -d archive_delay] sclass [sclass ...]\n");
+			fprintf(stderr,"\tmfsscadmin [/mountpoint] create|make [-a admin_only] [-m mode] LABELS sclass [sclass ...]\n");
+			fprintf(stderr,"\tmfsscadmin [/mountpoint] modify|change [-f] [-a admin_only] [-m mode] [-C create_labels] [-K keep_labels] [-A archive_labels] [-d archive_delay] sclass [sclass ...]\n");
 			fprintf(stderr,"\tmfsscadmin [/mountpoint] delete|remove sclass [sclass ...]\n");
 			fprintf(stderr,"\tmfsscadmin [/mountpoint] copy|duplicate src_sclass dst_sclass [dst_sclass ...]\n");
 			fprintf(stderr,"\tmfsscadmin [/mountpoint] rename src_sclass_name dst_sclass_name\n");
 			fprintf(stderr,"\tmfsscadmin [/mountpoint] list [-l]\n");
 			fprintf(stderr,"\n");
 			fprintf(stderr,"create/modify options:\n");
-			fprintf(stderr," -m - set create mode (options are: 'l' for 'loose', 's' for 'strict' and 'd' or not specified for 'default')\n");
+			fprintf(stderr," -m - set mode (options are: 'l' for 'loose', 's' for 'strict' and 'd' or not specified for 'default')\n");
 			fprintf(stderr,"    'default' mode: if there are overloaded servers, system will wait for them, but in case of no space available will use other servers (disregarding the labels).\n");
-			fprintf(stderr,"    'strict' mode: the system will wait for overloaded servers, but will return error (ENOSPC) when there is no space on servers with correct labels.\n");
+			fprintf(stderr,"    'strict' mode: the system will wait for overloaded servers, but when there is no space on servers with correct labels then will not use them (return ENOSPC or leave chunk as undergoal).\n");
 			fprintf(stderr,"    'loose' mode: the system will disregard the labels in both cases.\n");
 			fprintf(stderr," -a - set admin only mode ( 0 - anybody can use this storage class, 1 - only admin can use this storage class ) - by default it set to 0\n");
 			fprintf(stderr," -C - set labels used for creation chunks - when not specified then 'keep' labels are used\n");
@@ -3150,7 +3151,7 @@ int main(int argc,char **argv) {
 	char *p;
 
 	memset(&sc,0,sizeof(sc));
-	sc.create_mode = CREATE_MODE_STD;
+	sc.mode = SCLASS_MODE_STD;
 	strerr_init();
 	master_init();
 
@@ -4079,21 +4080,21 @@ int main(int argc,char **argv) {
 				chgmask |= SCLASS_CHG_CREATE_MASKS;
 				break;
 			case 'm':
-				if (chgmask & SCLASS_CHG_CREATE_MODE) {
+				if (chgmask & SCLASS_CHG_MODE) {
 					fprintf(stderr,"option '-m' defined more than once\n");
 					usage(f);
 				}
 				if (optarg[0]=='l' || optarg[0]=='L') {
-					sc.create_mode = CREATE_MODE_LOOSE;
+					sc.mode = SCLASS_MODE_LOOSE;
 				} else if (optarg[0]=='s' || optarg[0]=='S') {
-					sc.create_mode = CREATE_MODE_STRICT;
+					sc.mode = SCLASS_MODE_STRICT;
 				} else if (optarg[0]=='d' || optarg[0]=='D') {
-					sc.create_mode = CREATE_MODE_STD;
+					sc.mode = SCLASS_MODE_STD;
 				} else {
 					fprintf(stderr,"unknown create mode (option '-m')\n");
 					usage(f);
 				}
-				chgmask |= SCLASS_CHG_CREATE_MODE;
+				chgmask |= SCLASS_CHG_MODE;
 				break;
 			case 'a':
 				if (chgmask & SCLASS_CHG_ADMIN_ONLY) {

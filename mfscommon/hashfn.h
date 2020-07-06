@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -175,10 +175,10 @@ static inline uint32_t murmur3_32(const uint8_t *buf, uint32_t len, uint32_t has
 	k = 0;
 	switch (len & 3) {
 		case 3:
-			k ^= buf[2] << 16;
+			k ^= (buf[2] << 16);
 			nobreak;
 		case 2:
-			k ^= buf[1] << 8;
+			k ^= (buf[1] << 8);
 			nobreak;
 		case 1:
 			k ^= buf[0];

@@ -23,6 +23,7 @@ mfsmount_SOURCES=\
 	negentrycache.c negentrycache.h \
 	xattrcache.c xattrcache.h \
 	fdcache.c fdcache.h \
+	dentry_invalidator.c dentry_invalidator.h \
 	sustained_inodes.c sustained_inodes.h \
 	sustained_stats.c sustained_stats.h \
 	inoleng.c inoleng.h \
@@ -38,6 +39,7 @@ mfsmount_SOURCES=\
 	chunkrwlock.c chunkrwlock.h \
 	readdata.c readdata.h \
 	writedata.c writedata.h \
+	truncate.c truncate.h \
 	csdb.c csdb.h \
 	stats.c stats.h \
 	oplog.c oplog.h \
@@ -73,6 +75,7 @@ libmfsio_la_SOURCES=\
 	chunkrwlock.c chunkrwlock.h \
 	readdata.c readdata.h \
 	writedata.c writedata.h \
+	truncate.c truncate.h \
 	inoleng.c inoleng.h \
 	csdb.c csdb.h \
 	stats.c stats.h \
@@ -114,6 +117,7 @@ mfstools_SOURCES=\
 	../mfscommon/md5.c ../mfscommon/md5.h \
 	../mfscommon/liset64.c ../mfscommon/liset64.h \
 	../mfscommon/datapack.h ../mfscommon/mfsstrerr.h \
+	../mfscommon/mfsalloc.h \
 	../mfscommon/MFSCommunication.h
 
 mfstools_LDADD=$(MATH_LIBS)

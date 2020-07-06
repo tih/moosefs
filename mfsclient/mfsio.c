@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -40,6 +40,7 @@
 #include "inoleng.h"
 #include "readdata.h"
 #include "writedata.h"
+#include "truncate.h"
 #include "csdb.h"
 #include "delayrun.h"
 #include "conncache.h"
@@ -385,6 +386,11 @@ static int mfs_path_to_inodes(const char *path,uint32_t *parent,uint32_t *inode,
 	if (inode!=NULL) {
 		*inode = 0;
 	}
+	memset(attr,0,ATTR_RECORD_SIZE);
+	if (path[0]==0) {
+		errno = EINVAL;
+		return -1;
+	}
 	if (path[0]=='/' && path[1]==0) {
 		if (existflag==PATH_TO_INODES_SKIP_LAST) {
 			if (parent!=NULL) {
@@ -509,7 +515,7 @@ static uint64_t mfs_attr_to_size(const uint8_t attr[ATTR_RECORD_SIZE]) {
 	return get64bit(&ptr);
 }
 
-enum {MFS_IO_READWRITE,MFS_IO_READONLY,MFS_IO_WRITEONLY,MFS_IO_FORBIDDEN};
+enum {MFS_IO_READWRITE,MFS_IO_READONLY,MFS_IO_WRITEONLY,MFS_IO_READAPPEND,MFS_IO_APPENDONLY,MFS_IO_FORBIDDEN};
 
 typedef struct file_info {
 	void *flengptr;
@@ -902,7 +908,6 @@ int mfs_futimens(int fildes, const struct timespec times[2]) {
 
 static int mfs_truncate_int(uint32_t inode,uint8_t opened,off_t size,uint8_t attr[ATTR_RECORD_SIZE]) {
 	uint8_t status;
-	uint32_t trycnt;
 	cred cr;
 
 	if (size<0) {
@@ -915,21 +920,7 @@ static int mfs_truncate_int(uint32_t inode,uint8_t opened,off_t size,uint8_t att
 	}
 	write_data_flush_inode(inode);
 	mfs_get_credentials(&cr);
-	trycnt = 0;
-	while (1) {
-		status = fs_truncate(inode,(opened)?TRUNCATE_FLAG_OPENED:0,cr.uid,cr.gidcnt,cr.gidtab,size,attr);
-		if (status==MFS_STATUS_OK || status==MFS_ERROR_EROFS || status==MFS_ERROR_EACCES || status==MFS_ERROR_EPERM || status==MFS_ERROR_ENOENT || status==MFS_ERROR_QUOTA || status==MFS_ERROR_NOSPACE || status==MFS_ERROR_CHUNKLOST) {
-			break;
-		} else if (status!=MFS_ERROR_LOCKED) {
-			trycnt++;
-			if (trycnt>=30) {
-				break;
-			}
-			portable_usleep(1000+((trycnt<30)?((trycnt-1)*300000):10000000));
-		} else {
-			portable_usleep(10000);
-		}
-	}
+	status = do_truncate(inode,(opened)?TRUNCATE_FLAG_OPENED:0,cr.uid,cr.gidcnt,cr.gidtab,size,attr,NULL);
 	if (status!=MFS_STATUS_OK) {
 		errno = mfs_errorconv(status);
 		return -1;
@@ -1054,12 +1045,14 @@ int mfs_open(const char *path,int oflag,...) {
 	uint64_t fsize;
 	uint32_t parent;
 	uint32_t inode;
+	uint8_t noatomictrunc;
 	uint8_t name[256];
 	uint8_t nleng;
 	uint8_t attr[ATTR_RECORD_SIZE];
 	uint8_t status;
 	cred cr;
 	uint8_t mfsoflag;
+	uint8_t oflags;
 	int fildes;
 	int needopen;
 	file_info *fileinfo;
@@ -1067,16 +1060,25 @@ int mfs_open(const char *path,int oflag,...) {
 	mfsoflag = 0;
 	switch (oflag&O_ACCMODE) {
 		case O_RDONLY:
-			mfsoflag |= WANT_READ;
+			mfsoflag |= OPEN_READ;
 			break;
 		case O_WRONLY:
-			mfsoflag |= WANT_WRITE;
+			mfsoflag |= OPEN_WRITE;
 			break;
 		case O_RDWR:
-			mfsoflag |= WANT_READ | WANT_WRITE;
+			mfsoflag |= OPEN_READ | OPEN_WRITE;
 			break;
 	}
+	if (oflag&O_TRUNC) {
+		uint32_t mver;
+		mver = master_version();
+		noatomictrunc = (mver<VERSION2INT(3,0,113))?1:0;
+		mfsoflag |= OPEN_TRUNCATE;
+	} else {
+		noatomictrunc = 0;
+	}
 
+	oflags = 0;
 	needopen = 1;
 	if (mfs_path_to_inodes(path,&parent,&inode,name,&nleng,PATH_TO_INODES_CHECK_LAST,attr)<0) {
 		return -1;
@@ -1098,7 +1100,7 @@ int mfs_open(const char *path,int oflag,...) {
 				mfs_get_credentials(&cr);
 				last_umask = umask(last_umask); // see - mkdir
 				umask(last_umask);
-				status = fs_create(parent,nleng,(const uint8_t*)name,mode,last_umask,cr.uid,cr.gidcnt,cr.gidtab,&inode,attr);
+				status = fs_create(parent,nleng,(const uint8_t*)name,mode,last_umask,cr.uid,cr.gidcnt,cr.gidtab,&inode,attr,&oflags);
 				if (status!=MFS_STATUS_OK) {
 					errno = mfs_errorconv(status);
 					return -1;
@@ -1120,15 +1122,21 @@ int mfs_open(const char *path,int oflag,...) {
 
 		// open
 		mfs_get_credentials(&cr);
-		status = fs_opencheck(inode,cr.uid,cr.gidcnt,cr.gidtab,mfsoflag,attr);
+		status = fs_opencheck(inode,cr.uid,cr.gidcnt,cr.gidtab,mfsoflag,attr,&oflags);
 		if (status!=MFS_STATUS_OK) {
 			errno = mfs_errorconv(status);
 			return -1;
 		}
-		if (oflag&O_TRUNC) {
+		if (mfsoflag&OPEN_TRUNCATE && noatomictrunc) {
 			if (mfs_truncate_int(inode,1,0,attr)<0) {
 				return -1;
 			}
+		}
+	}
+	if (oflags & OPEN_APPENDONLY) {
+		if ((oflag&O_APPEND)==0) {
+			errno = EPERM;
+			return -1;
 		}
 	}
 
@@ -1153,10 +1161,18 @@ int mfs_open(const char *path,int oflag,...) {
 		fileinfo->mode = MFS_IO_READONLY;
 		fileinfo->rdata = read_data_new(inode,fsize);
 	} else if ((oflag&O_ACCMODE) == O_WRONLY) {
-		fileinfo->mode = MFS_IO_WRITEONLY;
+		if (oflag&O_APPEND) {
+			fileinfo->mode = MFS_IO_APPENDONLY;
+		} else {
+			fileinfo->mode = MFS_IO_WRITEONLY;
+		}
 		fileinfo->wdata = write_data_new(inode,fsize);
 	} else if ((oflag&O_ACCMODE) == O_RDWR) {
-		fileinfo->mode = MFS_IO_READWRITE;
+		if (oflag&O_APPEND) {
+			fileinfo->mode = MFS_IO_READAPPEND;
+		} else {
+			fileinfo->mode = MFS_IO_READWRITE;
+		}
 		fileinfo->rdata = read_data_new(inode,fsize);
 		fileinfo->wdata = write_data_new(inode,fsize);
 	}
@@ -1183,7 +1199,7 @@ static ssize_t mfs_pread_int(file_info *fileinfo,void *buf,size_t nbyte,off_t of
 		return -1;
 	}
 	zassert(pthread_mutex_lock(&(fileinfo->lock)));
-	if (fileinfo->mode==MFS_IO_WRITEONLY || fileinfo->mode==MFS_IO_FORBIDDEN) {
+	if (fileinfo->mode==MFS_IO_WRITEONLY || fileinfo->mode==MFS_IO_APPENDONLY || fileinfo->mode==MFS_IO_FORBIDDEN) {
 		zassert(pthread_mutex_unlock(&(fileinfo->lock)));
 		errno = EACCES;
 		return -1;
@@ -1253,6 +1269,7 @@ ssize_t mfs_read(int fildes,void *buf,size_t nbyte) {
 
 static ssize_t mfs_pwrite_int(file_info *fileinfo,const void *buf,size_t nbyte,off_t offset) {
 	uint64_t newfleng;
+	uint8_t appendonly;
 	int err;
 
 	if (fileinfo==NULL) {
@@ -1264,6 +1281,7 @@ static ssize_t mfs_pwrite_int(file_info *fileinfo,const void *buf,size_t nbyte,o
 		return -1;
 	}
 	zassert(pthread_mutex_lock(&(fileinfo->lock)));
+	appendonly = (fileinfo->mode==MFS_IO_APPENDONLY || fileinfo->mode==MFS_IO_READAPPEND)?1:0;
 	if (fileinfo->mode==MFS_IO_READONLY || fileinfo->mode==MFS_IO_FORBIDDEN) {
 		zassert(pthread_mutex_unlock(&(fileinfo->lock)));
 		errno = EACCES;
@@ -1277,13 +1295,37 @@ static ssize_t mfs_pwrite_int(file_info *fileinfo,const void *buf,size_t nbyte,o
 	fileinfo->writers_cnt--;
 	fileinfo->writing = 1;
 	// rwlock_wrlock end
-	zassert(pthread_mutex_unlock(&(fileinfo->lock)));
 
-	fs_mtime(fileinfo->inode);
-	err = write_data(fileinfo->wdata,offset,nbyte,(const uint8_t*)buf,(geteuid()==0)?1:0);
-	fs_mtime(fileinfo->inode);
+	err = 0;
+	if (appendonly) {
+		if (master_version()>=VERSION2INT(3,0,113)) {
+			uint8_t status;
+			uint64_t prevleng;
+			uint32_t gid = 0;
+			uint32_t inode = fileinfo->inode;
+			zassert(pthread_mutex_unlock(&(fileinfo->lock)));
+			status = do_truncate(inode,TRUNCATE_FLAG_OPENED|TRUNCATE_FLAG_UPDATE|TRUNCATE_FLAG_RESERVE,0,1,&gid,nbyte,NULL,&prevleng);
+			zassert(pthread_mutex_lock(&(fileinfo->lock)));
+			if (status!=MFS_STATUS_OK) {
+				err = mfs_errorconv(status);
+			} else {
+				offset = prevleng;
+			}
+		} else {
+			offset = inoleng_getfleng(fileinfo->flengptr);
+			if (offset+nbyte>=MAX_FILE_SIZE) {
+				err = EFBIG;
+			}
+		}
+	}
+	if (err==0) {
+		zassert(pthread_mutex_unlock(&(fileinfo->lock)));
+		fs_mtime(fileinfo->inode);
+		err = write_data(fileinfo->wdata,offset,nbyte,(const uint8_t*)buf,(geteuid()==0)?1:0);
+		fs_mtime(fileinfo->inode);
+		zassert(pthread_mutex_lock(&(fileinfo->lock)));
+	}
 
-	zassert(pthread_mutex_lock(&(fileinfo->lock)));
 	// rwlock_wrunlock begin
 	fileinfo->writing = 0;
 	zassert(pthread_cond_broadcast(&(fileinfo->rwcond)));
@@ -1329,8 +1371,12 @@ ssize_t mfs_write(int fildes,const void *buf,size_t nbyte) {
 	zassert(pthread_mutex_unlock(&(fileinfo->lock)));
 	s = mfs_pwrite_int(fileinfo,buf,nbyte,fileinfo->offset);
 	zassert(pthread_mutex_lock(&(fileinfo->lock)));
-	if (s>0) {
-		fileinfo->offset = offset + s;
+	if (fileinfo->mode==MFS_IO_APPENDONLY || fileinfo->mode==MFS_IO_READAPPEND) {
+		fileinfo->offset = inoleng_getfleng(fileinfo->flengptr);
+	} else {
+		if (s>0) {
+			fileinfo->offset = offset + s;
+		}
 	}
 	zassert(pthread_mutex_unlock(&(fileinfo->lock)));
 	return s;
@@ -1343,7 +1389,7 @@ static int mfs_fsync_int(file_info *fileinfo) {
 		return -1;
 	}
 	zassert(pthread_mutex_lock(&(fileinfo->lock)));
-	if (fileinfo->wdata!=NULL && (fileinfo->mode==MFS_IO_READWRITE || fileinfo->mode==MFS_IO_WRITEONLY)) {
+	if (fileinfo->wdata!=NULL && (fileinfo->mode!=MFS_IO_READONLY && fileinfo->mode!=MFS_IO_FORBIDDEN)) {
 		// rwlock_wrlock begin
 		fileinfo->writers_cnt++;
 		while (fileinfo->readers_cnt | fileinfo->writing) {
@@ -1591,22 +1637,24 @@ int mfs_fcntl_locks(int fildes, int function, struct flock *fl) {
 		return -1;
 	}
 
-	memset(fl,0,sizeof(struct flock));
-	if (rtype==POSIX_LOCK_RDLCK) {
-		fl->l_type = F_RDLCK;
-	} else if (rtype==POSIX_LOCK_WRLCK) {
-		fl->l_type = F_WRLCK;
-	} else {
-		fl->l_type = F_UNLCK;
+	if (function==F_GETLK) {
+		memset(fl,0,sizeof(struct flock));
+		if (rtype==POSIX_LOCK_RDLCK) {
+			fl->l_type = F_RDLCK;
+		} else if (rtype==POSIX_LOCK_WRLCK) {
+			fl->l_type = F_WRLCK;
+		} else {
+			fl->l_type = F_UNLCK;
+		}
+		fl->l_whence = SEEK_SET;
+		fl->l_start = rstart;
+		if ((rend-rstart)>INT64_MAX) {
+			fl->l_len = 0;
+		} else {
+			fl->l_len = (rend - rstart);
+		}
+		fl->l_pid = rpid;
 	}
-	fl->l_whence = SEEK_SET;
-	fl->l_start = rstart;
-	if ((rend-rstart)>INT64_MAX) {
-		fl->l_len = 0;
-	} else {
-		fl->l_len = (rend - rstart);
-	}
-	fl->l_pid = rpid;
 
 	return 0;
 }
@@ -1641,8 +1689,8 @@ int mfs_init(mfscfg *mcfg,uint8_t stage) {
 
 		csdb_init();
 		delay_init();
-		read_data_init(mcfg->read_cache_mb*1024*1024,0x200000,10*0x200000,mcfg->io_try_cnt,0,5);
-		write_data_init(mcfg->write_cache_mb*1024*1024,mcfg->io_try_cnt,0,5);
+		read_data_init(mcfg->read_cache_mb*1024*1024,0x200000,10*0x200000,mcfg->io_try_cnt,0,5,mcfg->error_on_lost_chunk,mcfg->error_on_no_space);
+		write_data_init(mcfg->write_cache_mb*1024*1024,mcfg->io_try_cnt,0,5,mcfg->error_on_lost_chunk,mcfg->error_on_no_space);
 
 		zassert(pthread_mutex_init(&fdtablock,NULL));
 		fdtab = malloc(sizeof(file_info)*FDTABSIZE_INIT);

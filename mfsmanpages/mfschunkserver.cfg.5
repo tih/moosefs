@@ -1,4 +1,4 @@
-.TH mfschunkserver.cfg "5" "November 2019" "MooseFS 3.0.109-1" "This is part of MooseFS"
+.TH mfschunkserver.cfg "5" "May 2020" "MooseFS 3.0.114-1" "This is part of MooseFS"
 .SH NAME
 mfschunkserver.cfg \- main configuration file for \fBmfschunkserver\fP
 .SH DESCRIPTION
@@ -78,11 +78,20 @@ enables/disables fsync before chunk closing; default is 0 (off)
 .B HDD_SPARSIFY_ON_WRITE
 enables/disables sparsification (skip leading and trailing zeroz) during writing new block; default is 1 (on)
 .TP
+.B HDD_RR_CHUNK_COUNT
+how many chunks should be created in one directory before moving to the next one; higher values are better with most OSes cacheing algorithms, low values lead to more even chunk distribution; default is 10000 which works best in most cases
+.TP
+.B HDD_KEEP_DUPLICATES_HOURS
+how many hours duplicate chunks should be kept before deleting (default is 168 - one week); changign this value and reloading will reset the counter
+.TP
+.B ALLOW_STARTING_WITH_INVALID_DISKS
+when set to one chunkserver will not abort start even when incorrect entries are found in 'mfshdd.cfg' file; default is 0 (do not start with invalid entries)
+.TP
 .BR WORKERS_MAX ", " WORKERS_MAX_IDLE
 maximum number of active workers and maximum number of idle workers; defaults are 250 and 40
 .TP
 .B LABELS
-labels string; default is empty - no labels
+labels string defined as a set of letters (case insensitive) separated by colon or semicolon; default is empty - no labels
 .TP
 .B BIND_HOST
 local address to use for master connections; default is *, i.e. default local address
@@ -108,13 +117,16 @@ authentication string (used only when master requires authorization)
 .B BIND_HOST
 local address to use for connecting with master (default is \fB*\fP, i.e. default local address)
 .TP
+.B CHUNKS_PER_REGISTER_PACKET
+maximum number of chunks system will try to put in a single register message (default is 10000, limits 1000-100000)
+.TP
 .B CSSERV_LISTEN_HOST
 IP address to listen on for client (mount) connections (\fB*\fP means any)
 .TP
 .B CSSERV_LISTEN_PORT
 port to listen on for client (mount) connections (default is 9422)
 .SH COPYRIGHT
-Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 
 This file is part of MooseFS.
 

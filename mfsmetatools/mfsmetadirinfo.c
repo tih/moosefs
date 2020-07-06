@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -812,7 +812,6 @@ int main(int argc,char *argv[]) {
 	allname = NULL;
 	sep = ',';
 	format = 0;
-	ofd = stdout;
 	while ((ch=getopt(argc,argv,"f:o:a:"))>=0) {
 		switch(ch) {
 			case 'f':

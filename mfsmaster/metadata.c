@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -76,6 +76,12 @@
 #define META_FILE_BUFFER_SIZE 0x1000000
 
 #define MAXIDHOLE 10000
+
+#ifdef EWOULDBLOCK
+#  define LOCK_ERRNO_ERROR (errno!=EACCES && errno!=EAGAIN && errno!=EWOULDBLOCK)
+#else
+#  define LOCK_ERRNO_ERROR (errno!=EACCES && errno!=EAGAIN)
+#endif
 
 static uint64_t metaversion;
 static uint64_t metaid;
@@ -684,7 +690,7 @@ int meta_storeall(int bg) {
 	mfd = open("metadata.mfs.back.tmp",O_RDWR);
 	if (mfd>=0) {
 		if (lockf(mfd,F_TEST,0)<0) {
-			if (ERRNO_ERROR) {
+			if (LOCK_ERRNO_ERROR) {
 				mfs_errlog(LOG_ERR,"metadata store lockf error");
 			} else {
 				syslog(LOG_ERR,"previous metadata save process hasn't finished yet - do not start another one");
@@ -745,7 +751,7 @@ int meta_storeall(int bg) {
 		if (i==0) { // store in background - lock file
 			mfd = bio_descriptor(fd);
 			if (lockf(mfd,F_TLOCK,0)<0) {
-				if (ERRNO_ERROR) {
+				if (LOCK_ERRNO_ERROR) {
 					mfs_errlog(LOG_ERR,"metadata store child - lockf error");
 				} else {
 					syslog(LOG_ERR,"metadata store child process - file is already locked !!!");
@@ -1099,6 +1105,9 @@ int meta_loadall(void) {
 								mfs_syslog(LOG_NOTICE,"found metadata file with different id number - cleanup your working directory or use '-i' flag (might be dangerous without cleaning)");
 								closedir(dd);
 								meta_file_infos();
+								if (bestfname) {
+									free((char*)bestfname);
+								}
 								return -1;
 							}
 						}
@@ -1155,6 +1164,9 @@ int meta_loadall(void) {
 
 		if (bestver==0) {
 			mfs_syslog(LOG_ERR,"can't find valid metadata file");
+			if (bestfname) {
+				free((char*)bestfname);
+			}
 			return -1;
 		}
 		if (verboselevel>0) {

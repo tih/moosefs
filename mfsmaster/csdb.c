@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -482,10 +482,10 @@ void csdb_remove_unused(void) {
 						tmpremoved_servers--;
 					}
 					*cspptr = csptr->next;
-					free(csptr);
 					servers--;
 					disconnected_servers--;
 					changelog("%"PRIu32"|CSDBOP(%u,%"PRIu32",%"PRIu16",0)",main_time(),CSDB_OP_DEL,csptr->ip,csptr->port);
+					free(csptr);
 				} else {
 					cspptr = &(csptr->next);
 				}

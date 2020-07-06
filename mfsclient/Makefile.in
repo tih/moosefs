@@ -149,8 +149,8 @@ am_libmfsio_la_OBJECTS = libmfsio_la-labelparser.lo \
 	libmfsio_la-heapsorter.lo libmfsio_la-csorder.lo \
 	libmfsio_la-chunksdatacache.lo libmfsio_la-chunkrwlock.lo \
 	libmfsio_la-readdata.lo libmfsio_la-writedata.lo \
-	libmfsio_la-inoleng.lo libmfsio_la-csdb.lo \
-	libmfsio_la-stats.lo libmfsio_la-mfsio.lo \
+	libmfsio_la-truncate.lo libmfsio_la-inoleng.lo \
+	libmfsio_la-csdb.lo libmfsio_la-stats.lo libmfsio_la-mfsio.lo \
 	../mfscommon/libmfsio_la-clocks.lo \
 	../mfscommon/libmfsio_la-delayrun.lo \
 	../mfscommon/libmfsio_la-pcqueue.lo \
@@ -183,7 +183,9 @@ am_mfsmount_OBJECTS = mfsmount-labelparser.$(OBJEXT) \
 	mfsmount-dirattrcache.$(OBJEXT) \
 	mfsmount-symlinkcache.$(OBJEXT) \
 	mfsmount-negentrycache.$(OBJEXT) mfsmount-xattrcache.$(OBJEXT) \
-	mfsmount-fdcache.$(OBJEXT) mfsmount-sustained_inodes.$(OBJEXT) \
+	mfsmount-fdcache.$(OBJEXT) \
+	mfsmount-dentry_invalidator.$(OBJEXT) \
+	mfsmount-sustained_inodes.$(OBJEXT) \
 	mfsmount-sustained_stats.$(OBJEXT) mfsmount-inoleng.$(OBJEXT) \
 	mfsmount-getgroups.$(OBJEXT) mfsmount-mfs_fuse.$(OBJEXT) \
 	mfsmount-mfs_meta_fuse.$(OBJEXT) mfsmount-mastercomm.$(OBJEXT) \
@@ -191,9 +193,9 @@ am_mfsmount_OBJECTS = mfsmount-labelparser.$(OBJEXT) \
 	mfsmount-masterproxy.$(OBJEXT) mfsmount-csorder.$(OBJEXT) \
 	mfsmount-chunksdatacache.$(OBJEXT) \
 	mfsmount-chunkrwlock.$(OBJEXT) mfsmount-readdata.$(OBJEXT) \
-	mfsmount-writedata.$(OBJEXT) mfsmount-csdb.$(OBJEXT) \
-	mfsmount-stats.$(OBJEXT) mfsmount-oplog.$(OBJEXT) \
-	mfsmount-mfsmount.$(OBJEXT) \
+	mfsmount-writedata.$(OBJEXT) mfsmount-truncate.$(OBJEXT) \
+	mfsmount-csdb.$(OBJEXT) mfsmount-stats.$(OBJEXT) \
+	mfsmount-oplog.$(OBJEXT) mfsmount-mfsmount.$(OBJEXT) \
 	../mfscommon/mfsmount-clocks.$(OBJEXT) \
 	../mfscommon/mfsmount-delayrun.$(OBJEXT) \
 	../mfscommon/mfsmount-pcqueue.$(OBJEXT) \
@@ -271,11 +273,13 @@ am__depfiles_remade = ../mfscommon/$(DEPDIR)/clocks.Po \
 	./$(DEPDIR)/libmfsio_la-mfsio.Plo \
 	./$(DEPDIR)/libmfsio_la-readdata.Plo \
 	./$(DEPDIR)/libmfsio_la-stats.Plo \
+	./$(DEPDIR)/libmfsio_la-truncate.Plo \
 	./$(DEPDIR)/libmfsio_la-writedata.Plo \
 	./$(DEPDIR)/mfsbdev-nbdmain.Po \
 	./$(DEPDIR)/mfsmount-chunkrwlock.Po \
 	./$(DEPDIR)/mfsmount-chunksdatacache.Po \
 	./$(DEPDIR)/mfsmount-csdb.Po ./$(DEPDIR)/mfsmount-csorder.Po \
+	./$(DEPDIR)/mfsmount-dentry_invalidator.Po \
 	./$(DEPDIR)/mfsmount-dirattrcache.Po \
 	./$(DEPDIR)/mfsmount-extrapackets.Po \
 	./$(DEPDIR)/mfsmount-fdcache.Po \
@@ -294,6 +298,7 @@ am__depfiles_remade = ../mfscommon/$(DEPDIR)/clocks.Po \
 	./$(DEPDIR)/mfsmount-sustained_inodes.Po \
 	./$(DEPDIR)/mfsmount-sustained_stats.Po \
 	./$(DEPDIR)/mfsmount-symlinkcache.Po \
+	./$(DEPDIR)/mfsmount-truncate.Po \
 	./$(DEPDIR)/mfsmount-writedata.Po \
 	./$(DEPDIR)/mfsmount-xattrcache.Po ./$(DEPDIR)/mfstools.Po \
 	./$(DEPDIR)/mfstools_master.Po
@@ -519,6 +524,7 @@ mfsmount_SOURCES = \
 	negentrycache.c negentrycache.h \
 	xattrcache.c xattrcache.h \
 	fdcache.c fdcache.h \
+	dentry_invalidator.c dentry_invalidator.h \
 	sustained_inodes.c sustained_inodes.h \
 	sustained_stats.c sustained_stats.h \
 	inoleng.c inoleng.h \
@@ -534,6 +540,7 @@ mfsmount_SOURCES = \
 	chunkrwlock.c chunkrwlock.h \
 	readdata.c readdata.h \
 	writedata.c writedata.h \
+	truncate.c truncate.h \
 	csdb.c csdb.h \
 	stats.c stats.h \
 	oplog.c oplog.h \
@@ -568,6 +575,7 @@ libmfsio_la_SOURCES = \
 	chunkrwlock.c chunkrwlock.h \
 	readdata.c readdata.h \
 	writedata.c writedata.h \
+	truncate.c truncate.h \
 	inoleng.c inoleng.h \
 	csdb.c csdb.h \
 	stats.c stats.h \
@@ -609,6 +617,7 @@ mfstools_SOURCES = \
 	../mfscommon/md5.c ../mfscommon/md5.h \
 	../mfscommon/liset64.c ../mfscommon/liset64.h \
 	../mfscommon/datapack.h ../mfscommon/mfsstrerr.h \
+	../mfscommon/mfsalloc.h \
 	../mfscommon/MFSCommunication.h
 
 mfstools_LDADD = $(MATH_LIBS)
@@ -924,12 +933,14 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libmfsio_la-mfsio.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libmfsio_la-readdata.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libmfsio_la-stats.Plo@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libmfsio_la-truncate.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/libmfsio_la-writedata.Plo@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsbdev-nbdmain.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-chunkrwlock.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-chunksdatacache.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-csdb.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-csorder.Po@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-dentry_invalidator.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-dirattrcache.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-extrapackets.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-fdcache.Po@am__quote@ # am--include-marker
@@ -949,6 +960,7 @@ distclean-compile:
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-sustained_inodes.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-sustained_stats.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-symlinkcache.Po@am__quote@ # am--include-marker
+@AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-truncate.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-writedata.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfsmount-xattrcache.Po@am__quote@ # am--include-marker
 @AMDEP_TRUE@@am__include@ @am__quote@./$(DEPDIR)/mfstools.Po@am__quote@ # am--include-marker
@@ -1046,6 +1058,13 @@ libmfsio_la-writedata.lo: writedata.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='writedata.c' object='libmfsio_la-writedata.lo' libtool=yes @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libmfsio_la_CPPFLAGS) $(CPPFLAGS) $(libmfsio_la_CFLAGS) $(CFLAGS) -c -o libmfsio_la-writedata.lo `test -f 'writedata.c' || echo '$(srcdir)/'`writedata.c
+
+libmfsio_la-truncate.lo: truncate.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libmfsio_la_CPPFLAGS) $(CPPFLAGS) $(libmfsio_la_CFLAGS) $(CFLAGS) -MT libmfsio_la-truncate.lo -MD -MP -MF $(DEPDIR)/libmfsio_la-truncate.Tpo -c -o libmfsio_la-truncate.lo `test -f 'truncate.c' || echo '$(srcdir)/'`truncate.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/libmfsio_la-truncate.Tpo $(DEPDIR)/libmfsio_la-truncate.Plo
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='truncate.c' object='libmfsio_la-truncate.lo' libtool=yes @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libmfsio_la_CPPFLAGS) $(CPPFLAGS) $(libmfsio_la_CFLAGS) $(CFLAGS) -c -o libmfsio_la-truncate.lo `test -f 'truncate.c' || echo '$(srcdir)/'`truncate.c
 
 libmfsio_la-inoleng.lo: inoleng.c
 @am__fastdepCC_TRUE@	$(AM_V_CC)$(LIBTOOL) $(AM_V_lt) --tag=CC $(AM_LIBTOOLFLAGS) $(LIBTOOLFLAGS) --mode=compile $(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(libmfsio_la_CPPFLAGS) $(CPPFLAGS) $(libmfsio_la_CFLAGS) $(CFLAGS) -MT libmfsio_la-inoleng.lo -MD -MP -MF $(DEPDIR)/libmfsio_la-inoleng.Tpo -c -o libmfsio_la-inoleng.lo `test -f 'inoleng.c' || echo '$(srcdir)/'`inoleng.c
@@ -1306,6 +1325,20 @@ mfsmount-fdcache.obj: fdcache.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -c -o mfsmount-fdcache.obj `if test -f 'fdcache.c'; then $(CYGPATH_W) 'fdcache.c'; else $(CYGPATH_W) '$(srcdir)/fdcache.c'; fi`
 
+mfsmount-dentry_invalidator.o: dentry_invalidator.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -MT mfsmount-dentry_invalidator.o -MD -MP -MF $(DEPDIR)/mfsmount-dentry_invalidator.Tpo -c -o mfsmount-dentry_invalidator.o `test -f 'dentry_invalidator.c' || echo '$(srcdir)/'`dentry_invalidator.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/mfsmount-dentry_invalidator.Tpo $(DEPDIR)/mfsmount-dentry_invalidator.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='dentry_invalidator.c' object='mfsmount-dentry_invalidator.o' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -c -o mfsmount-dentry_invalidator.o `test -f 'dentry_invalidator.c' || echo '$(srcdir)/'`dentry_invalidator.c
+
+mfsmount-dentry_invalidator.obj: dentry_invalidator.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -MT mfsmount-dentry_invalidator.obj -MD -MP -MF $(DEPDIR)/mfsmount-dentry_invalidator.Tpo -c -o mfsmount-dentry_invalidator.obj `if test -f 'dentry_invalidator.c'; then $(CYGPATH_W) 'dentry_invalidator.c'; else $(CYGPATH_W) '$(srcdir)/dentry_invalidator.c'; fi`
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/mfsmount-dentry_invalidator.Tpo $(DEPDIR)/mfsmount-dentry_invalidator.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='dentry_invalidator.c' object='mfsmount-dentry_invalidator.obj' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -c -o mfsmount-dentry_invalidator.obj `if test -f 'dentry_invalidator.c'; then $(CYGPATH_W) 'dentry_invalidator.c'; else $(CYGPATH_W) '$(srcdir)/dentry_invalidator.c'; fi`
+
 mfsmount-sustained_inodes.o: sustained_inodes.c
 @am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -MT mfsmount-sustained_inodes.o -MD -MP -MF $(DEPDIR)/mfsmount-sustained_inodes.Tpo -c -o mfsmount-sustained_inodes.o `test -f 'sustained_inodes.c' || echo '$(srcdir)/'`sustained_inodes.c
 @am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/mfsmount-sustained_inodes.Tpo $(DEPDIR)/mfsmount-sustained_inodes.Po
@@ -1515,6 +1548,20 @@ mfsmount-writedata.obj: writedata.c
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='writedata.c' object='mfsmount-writedata.obj' libtool=no @AMDEPBACKSLASH@
 @AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
 @am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -c -o mfsmount-writedata.obj `if test -f 'writedata.c'; then $(CYGPATH_W) 'writedata.c'; else $(CYGPATH_W) '$(srcdir)/writedata.c'; fi`
+
+mfsmount-truncate.o: truncate.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -MT mfsmount-truncate.o -MD -MP -MF $(DEPDIR)/mfsmount-truncate.Tpo -c -o mfsmount-truncate.o `test -f 'truncate.c' || echo '$(srcdir)/'`truncate.c
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/mfsmount-truncate.Tpo $(DEPDIR)/mfsmount-truncate.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='truncate.c' object='mfsmount-truncate.o' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -c -o mfsmount-truncate.o `test -f 'truncate.c' || echo '$(srcdir)/'`truncate.c
+
+mfsmount-truncate.obj: truncate.c
+@am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -MT mfsmount-truncate.obj -MD -MP -MF $(DEPDIR)/mfsmount-truncate.Tpo -c -o mfsmount-truncate.obj `if test -f 'truncate.c'; then $(CYGPATH_W) 'truncate.c'; else $(CYGPATH_W) '$(srcdir)/truncate.c'; fi`
+@am__fastdepCC_TRUE@	$(AM_V_at)$(am__mv) $(DEPDIR)/mfsmount-truncate.Tpo $(DEPDIR)/mfsmount-truncate.Po
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	$(AM_V_CC)source='truncate.c' object='mfsmount-truncate.obj' libtool=no @AMDEPBACKSLASH@
+@AMDEP_TRUE@@am__fastdepCC_FALSE@	DEPDIR=$(DEPDIR) $(CCDEPMODE) $(depcomp) @AMDEPBACKSLASH@
+@am__fastdepCC_FALSE@	$(AM_V_CC@am__nodep@)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -c -o mfsmount-truncate.obj `if test -f 'truncate.c'; then $(CYGPATH_W) 'truncate.c'; else $(CYGPATH_W) '$(srcdir)/truncate.c'; fi`
 
 mfsmount-csdb.o: csdb.c
 @am__fastdepCC_TRUE@	$(AM_V_CC)$(CC) $(DEFS) $(DEFAULT_INCLUDES) $(INCLUDES) $(mfsmount_CPPFLAGS) $(CPPFLAGS) $(mfsmount_CFLAGS) $(CFLAGS) -MT mfsmount-csdb.o -MD -MP -MF $(DEPDIR)/mfsmount-csdb.Tpo -c -o mfsmount-csdb.o `test -f 'csdb.c' || echo '$(srcdir)/'`csdb.c
@@ -1914,12 +1961,14 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/libmfsio_la-mfsio.Plo
 	-rm -f ./$(DEPDIR)/libmfsio_la-readdata.Plo
 	-rm -f ./$(DEPDIR)/libmfsio_la-stats.Plo
+	-rm -f ./$(DEPDIR)/libmfsio_la-truncate.Plo
 	-rm -f ./$(DEPDIR)/libmfsio_la-writedata.Plo
 	-rm -f ./$(DEPDIR)/mfsbdev-nbdmain.Po
 	-rm -f ./$(DEPDIR)/mfsmount-chunkrwlock.Po
 	-rm -f ./$(DEPDIR)/mfsmount-chunksdatacache.Po
 	-rm -f ./$(DEPDIR)/mfsmount-csdb.Po
 	-rm -f ./$(DEPDIR)/mfsmount-csorder.Po
+	-rm -f ./$(DEPDIR)/mfsmount-dentry_invalidator.Po
 	-rm -f ./$(DEPDIR)/mfsmount-dirattrcache.Po
 	-rm -f ./$(DEPDIR)/mfsmount-extrapackets.Po
 	-rm -f ./$(DEPDIR)/mfsmount-fdcache.Po
@@ -1939,6 +1988,7 @@ distclean: distclean-am
 	-rm -f ./$(DEPDIR)/mfsmount-sustained_inodes.Po
 	-rm -f ./$(DEPDIR)/mfsmount-sustained_stats.Po
 	-rm -f ./$(DEPDIR)/mfsmount-symlinkcache.Po
+	-rm -f ./$(DEPDIR)/mfsmount-truncate.Po
 	-rm -f ./$(DEPDIR)/mfsmount-writedata.Po
 	-rm -f ./$(DEPDIR)/mfsmount-xattrcache.Po
 	-rm -f ./$(DEPDIR)/mfstools.Po
@@ -2032,12 +2082,14 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/libmfsio_la-mfsio.Plo
 	-rm -f ./$(DEPDIR)/libmfsio_la-readdata.Plo
 	-rm -f ./$(DEPDIR)/libmfsio_la-stats.Plo
+	-rm -f ./$(DEPDIR)/libmfsio_la-truncate.Plo
 	-rm -f ./$(DEPDIR)/libmfsio_la-writedata.Plo
 	-rm -f ./$(DEPDIR)/mfsbdev-nbdmain.Po
 	-rm -f ./$(DEPDIR)/mfsmount-chunkrwlock.Po
 	-rm -f ./$(DEPDIR)/mfsmount-chunksdatacache.Po
 	-rm -f ./$(DEPDIR)/mfsmount-csdb.Po
 	-rm -f ./$(DEPDIR)/mfsmount-csorder.Po
+	-rm -f ./$(DEPDIR)/mfsmount-dentry_invalidator.Po
 	-rm -f ./$(DEPDIR)/mfsmount-dirattrcache.Po
 	-rm -f ./$(DEPDIR)/mfsmount-extrapackets.Po
 	-rm -f ./$(DEPDIR)/mfsmount-fdcache.Po
@@ -2057,6 +2109,7 @@ maintainer-clean: maintainer-clean-am
 	-rm -f ./$(DEPDIR)/mfsmount-sustained_inodes.Po
 	-rm -f ./$(DEPDIR)/mfsmount-sustained_stats.Po
 	-rm -f ./$(DEPDIR)/mfsmount-symlinkcache.Po
+	-rm -f ./$(DEPDIR)/mfsmount-truncate.Po
 	-rm -f ./$(DEPDIR)/mfsmount-writedata.Po
 	-rm -f ./$(DEPDIR)/mfsmount-xattrcache.Po
 	-rm -f ./$(DEPDIR)/mfstools.Po

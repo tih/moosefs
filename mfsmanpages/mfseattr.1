@@ -1,4 +1,4 @@
-.TH mfseattr "1" "November 2019" "MooseFS 3.0.109-1" "This is part of MooseFS"
+.TH mfseattr "1" "May 2020" "MooseFS 3.0.114-1" "This is part of MooseFS"
 .SH NAME
 mfseattr \- \fBMooseFS\fP extra attributes management tools
 .SH SYNOPSIS
@@ -35,6 +35,12 @@ from being cached in kernel.
 \fBnodatacache\fP This flag means, that data cache should be cleared every time a file is opened.
 .PP
 \fBsnapshot\fP This flag means that the object was created via a \fBmfsmakesnapshot\fP command
+.PP
+\fBundeletable\fP This flag prevents unlinking (admin only; not inherited)
+.PP
+\fBappendonly\fP Object with this flag can only be appended to, unlinking and other modifications are not allowed (admin only; not inherited)
+.PP
+\fBimmutable\fP This flag prevents any change to given object (admin only; not inherited)
 .SH GENERAL OPTIONS
 Most of \fBmfstools\fP use \fB-n\fP, \fB-h\fP, \fB-H\fP, \fB-k\fP, \fB-m\fP and \fB-g\fP
 options to select
@@ -60,7 +66,7 @@ an attribute for a directory and all of its children use \fB-r\fP option.
 .SH "REPORTING BUGS"
 Report bugs to <bugs@moosefs.com>.
 .SH COPYRIGHT
-Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 
 This file is part of MooseFS.
 

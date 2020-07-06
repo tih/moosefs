@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -46,6 +46,11 @@
 #  if defined(OOM_DISABLE) || defined(OOM_SCORE_ADJ_MIN)
 #    define OOM_ADJUSTABLE 1
 #  endif
+#endif
+
+#if defined(HAVE_SYS_UTSNAME_H)
+#  include <sys/utsname.h>
+#  define MFS_GET_KERNEL_VERSION 1
 #endif
 
 #include "fusecommon.h"
@@ -221,6 +226,8 @@ struct mfsopts {
 	unsigned readaheadsize;
 	unsigned readaheadleng;
 	unsigned readaheadtrigger;
+	int erroronlostchunk;
+	int erroronnospace;
 	unsigned ioretries;
 	unsigned timeout;
 	unsigned logretry;
@@ -292,6 +299,8 @@ static struct fuse_opt mfs_opts_stage2[] = {
 	MFS_OPT("mfsreadaheadsize=%u", readaheadsize, 0),
 	MFS_OPT("mfsreadaheadleng=%u", readaheadleng, 0),
 	MFS_OPT("mfsreadaheadtrigger=%u", readaheadtrigger, 0),
+	MFS_OPT("mfserroronlostchunk", erroronlostchunk, 1),
+	MFS_OPT("mfserroronnospace", erroronnospace, 1),
 	MFS_OPT("mfsioretries=%u", ioretries, 0),
 	MFS_OPT("mfstimeout=%u", timeout, 0),
 	MFS_OPT("mfslogretry=%u", logretry, 0),
@@ -419,6 +428,8 @@ static void usage(const char *progname) {
 	fprintf(fd,"    -o mfsreadaheadsize=N       define size of all read ahead buffers in MiB (default: 256)\n");
 	fprintf(fd,"    -o mfsreadaheadleng=N       define amount of bytes to be additionally read (default: 1048576)\n");
 	fprintf(fd,"    -o mfsreadaheadtrigger=N    define amount of bytes read sequentially that turns on read ahead (default: 10 * mfsreadaheadleng)\n");
+	fprintf(fd,"    -o mfserroronlostchunk      when all known chunkservers are connected to the master and the required chunk is missing then immediately finish I/O and return an error\n");
+	fprintf(fd,"    -o mfserroronnospace        when all known chunkservers are connected to the master and there is no free space then immediately finish I/O and return an error\n");
 	fprintf(fd,"    -o mfsioretries=N           define number of retries before I/O error is returned (default: 30)\n");
 	fprintf(fd,"    -o mfstimeout=N             define maximum timeout in seconds before I/O error is returned (default: 0 - which means no timeout)\n");
 	fprintf(fd,"    -o mfslogretry=N            define minimal retry counter on which system will start log I/O messages (default: 5)\n");
@@ -622,9 +633,22 @@ static int mfs_opt_proc_stage2(void *data, const char *arg, int key, struct fuse
 	}
 }
 
+static uint8_t fuse_init_set = 0;
+static uint32_t fuse_proto_major = 0;
+static uint32_t fuse_proto_minor = 0;
+#if FUSE_VERSION >= 28
+static uint32_t fuse_capable = 0;
+static uint32_t fuse_defaults = 0;
+static uint32_t fuse_want = 0;
+#endif
+
 static void mfs_fsinit (void *userdata, struct fuse_conn_info *conn) {
 	int *piped = (int*)userdata;
 	char s;
+
+#if FUSE_VERSION >= 28
+	fuse_defaults = conn->want;
+#endif
 #if FUSE_VERSION >= 30
 
 //	conn->max_write - default should be set to maximum value, so we don't want to decrease it
@@ -655,9 +679,9 @@ static void mfs_fsinit (void *userdata, struct fuse_conn_info *conn) {
 #ifdef FUSE_CAP_ASYNC_READ
 	conn->want |= FUSE_CAP_ASYNC_READ;
 #endif
-// turn off FUSE_CAP_ATOMIC_O_TRUNC - as for now we don't support O_TRUNC flag
+// turn on FUSE_CAP_ATOMIC_O_TRUNC
 #ifdef FUSE_CAP_ATOMIC_O_TRUNC
-	conn->want &= ~FUSE_CAP_ATOMIC_O_TRUNC;
+	conn->want |= FUSE_CAP_ATOMIC_O_TRUNC;
 #endif
 // turn on FUSE_CAP_EXPORT_SUPPORT (we do support lookups of "." and "..")
 #ifdef FUSE_CAP_EXPORT_SUPPORT
@@ -762,6 +786,7 @@ static void mfs_fsinit (void *userdata, struct fuse_conn_info *conn) {
 	}
 #endif
 #endif /* FUSE2/3 */
+
 #if defined(__FreeBSD__)
 	if (conn->proto_major>7 || (conn->proto_major==7 && conn->proto_minor>=23)) { // This is "New" Fuse introduced in FBSD 12.1 with many fixes - we want to change our default behaviour
 		mfs_freebsd_workarounds(0);
@@ -769,6 +794,13 @@ static void mfs_fsinit (void *userdata, struct fuse_conn_info *conn) {
 		mfs_freebsd_workarounds(1);
 	}
 #endif
+	fuse_proto_major = conn->proto_major;
+	fuse_proto_minor = conn->proto_minor;
+#if FUSE_VERSION >= 28
+	fuse_capable = conn->capable;
+	fuse_want = conn->want;
+#endif
+	fuse_init_set = 1;
 	if (piped[1]>=0) {
 		s=0;
 		if (write(piped[1],&s,1)!=1) {
@@ -776,6 +808,32 @@ static void mfs_fsinit (void *userdata, struct fuse_conn_info *conn) {
 		}
 		close(piped[1]);
 	}
+}
+
+static uint8_t params_sesflags = 0;
+static uint16_t params_umaskval = 0;
+static uint32_t params_maprootuid = 0;
+static uint32_t params_maprootgid = 0;
+static uint32_t params_mapalluid = 0;
+static uint32_t params_mapallgid = 0;
+static uint8_t params_mingoal = 0;
+static uint8_t params_maxgoal = 0;
+static uint32_t params_mintrashtime = 0;
+static uint32_t params_maxtrashtime = 0;
+static uint32_t params_disables = 0;
+
+void main_setparams(uint8_t sesflags,uint16_t umaskval,uint32_t maprootuid,uint32_t maprootgid,uint32_t mapalluid,uint32_t mapallgid,uint8_t mingoal,uint8_t maxgoal,uint32_t mintrashtime,uint32_t maxtrashtime,uint32_t disables) {
+	params_sesflags = sesflags;
+	params_umaskval = umaskval;
+	params_maprootuid = maprootuid;
+	params_maprootgid = maprootgid;
+	params_mapalluid = mapalluid;
+	params_mapallgid = mapallgid;
+	params_mingoal = mingoal;
+	params_maxgoal = maxgoal;
+	params_mintrashtime = mintrashtime;
+	params_maxtrashtime = maxtrashtime;
+	params_disables = disables;
 }
 
 uint32_t main_snprint_parameters(char *buff,uint32_t size) {
@@ -816,6 +874,8 @@ uint32_t main_snprint_parameters(char *buff,uint32_t size) {
 	NUMOPT("mfsreadaheadsize","u",readaheadsize);
 	NUMOPT("mfsreadaheadleng","u",readaheadleng);
 	NUMOPT("mfsreadaheadtrigger","u",readaheadtrigger);
+	BOOLOPT("mfserroronlostchunk",erroronlostchunk);
+	BOOLOPT("mfserroronnospace",erroronnospace);
 	NUMOPT("mfsioretries","u",ioretries);
 	NUMOPT("mfstimeout","u",timeout);
 	NUMOPT("mfslogretry","u",logretry);
@@ -855,7 +915,79 @@ uint32_t main_snprint_parameters(char *buff,uint32_t size) {
 			(mfsopts.sugidclearmode==SUGID_CLEAR_MODE_XFS)?"XFS":
 			"(unknown value)");
 	DIRECTOPT("no_std_mount_options",(mfsopts.nostdmountoptions)?"(defined)":"(not defined)");
+	bprintf("master_sesflags: %"PRIu8"\n",params_sesflags);
+	bprintf("master_umaskval: 0%03"PRIo16"\n",params_umaskval);
+	bprintf("master_maproot: %"PRIu32":%"PRIu32"\n",params_maprootuid,params_maprootgid);
+	bprintf("master_mapall: %"PRIu32":%"PRIu32"\n",params_mapalluid,params_mapallgid);
+	bprintf("master_goallimit: %"PRIu8":%"PRIu8"\n",params_mingoal,params_maxgoal);
+	bprintf("master_trashlimit: %"PRIu32":%"PRIu32"\n",params_mintrashtime,params_maxtrashtime);
+	bprintf("master_disables: 0x%"PRIX32"\n",params_disables);
+	{
+		uint32_t mver = master_version();
+		if (mver>0) {
+			bprintf("moosefs_master_version: %u.%u.%u%s\n",(mver>>16),(mver>>8)&0xFF,(mver>>1)&0x7F,(mver&1)?"-pro":"");
+		}
+	}
+	bprintf("moosefs_mount_version: %s\n",VERSSTR);
+	bprintf("moosefs_mount_build: %u\n",BUILDNO);
+	bprintf("compiled_with_fuse: %u.%u\n",((FUSE_VERSION)/10),((FUSE_VERSION)%10));
+#if HAVE_FUSE_VERSION
+	{
+		int libver = fuse_version();
+		bprintf("fuse_library_version: %"PRId32".%"PRId32"\n",libver/10,libver%10);
+	}
+#endif
+	if (fuse_init_set) {
+		bprintf("kernel_fuse_protocol: %"PRIu32".%"PRIu32"\n",fuse_proto_major,fuse_proto_minor);
+#if FUSE_VERSION >= 28
+		bprintf("kernel_capability_mask: 0x%"PRIX32"\n",fuse_capable);
+		bprintf("kernel_defaults_mask: 0x%"PRIX32"\n",fuse_defaults);
+		bprintf("kernel_working_mask: 0x%"PRIX32"\n",fuse_want);
+#endif
+	}
 	return leng;
+}
+
+uint32_t main_kernelversion(void) {
+#ifdef MFS_GET_KERNEL_VERSION
+	uint32_t maj,min;
+	const char *r;
+	struct utsname utsn;
+
+	maj = 0;
+	min = 0;
+	if (uname(&utsn)<0) {
+		fprintf(stderr,"uname error: %s\n",strerr(errno));
+		return 0;
+	}
+	r = utsn.release;
+	if (r==NULL) {
+		fprintf(stderr,"uname error: (release is NULL)\n");
+		return 0;
+	}
+	while (*r>='0' && *r<='9') {
+		maj *= 10;
+		maj += (*r)-'0';
+		r++;
+	}
+	if (*r=='.') {
+		r++;
+		while (*r>='0' && *r<='9') {
+			min *= 10;
+			min += (*r)-'0';
+			r++;
+		}
+	}
+	if (maj>0xFFFF) {
+		maj = 0xFFFF;
+	}
+	if (min>0xFFFF) {
+		min = 0xFFFF;
+	}
+	return maj * 0x10000 + min;
+#else
+	return 0;
+#endif
 }
 
 #if FUSE_VERSION >= 30
@@ -1108,14 +1240,14 @@ int mainloop(struct fuse_args *args,const char* mp,int mt,int fg) {
 	} else {
 		csdb_init();
 		delay_init();
-		read_data_init(mfsopts.readaheadsize*1024*1024,mfsopts.readaheadleng,mfsopts.readaheadtrigger,mfsopts.ioretries,mfsopts.timeout,mfsopts.logretry);
-		write_data_init(mfsopts.writecachesize*1024*1024,mfsopts.ioretries,mfsopts.timeout,mfsopts.logretry);
+		read_data_init(mfsopts.readaheadsize*1024*1024,mfsopts.readaheadleng,mfsopts.readaheadtrigger,mfsopts.ioretries,mfsopts.timeout,mfsopts.logretry,mfsopts.erroronlostchunk,mfsopts.erroronnospace);
+		write_data_init(mfsopts.writecachesize*1024*1024,mfsopts.ioretries,mfsopts.timeout,mfsopts.logretry,mfsopts.erroronlostchunk,mfsopts.erroronnospace);
 #if FUSE_VERSION >= 30
 		mfs_init(mfsopts.debug,mfsopts.keepcache,mfsopts.direntrycacheto,mfsopts.entrycacheto,mfsopts.attrcacheto,mfsopts.xattrcacheto,mfsopts.groupscacheto,mfsopts.mkdircopysgid,mfsopts.sugidclearmode,1,mfsopts.fsyncmintime,mfsopts.noxattrs,mfsopts.noposixlocks,mfsopts.nobsdlocks); //mfsopts.xattraclsupport);
 		se = fuse_session_new(args, &mfs_oper, sizeof(mfs_oper), (void*)piped);
 		mfs_setsession(se);
 #else /* FUSE2 */
-		mfs_init(ch,mfsopts.debug,mfsopts.keepcache,mfsopts.direntrycacheto,mfsopts.entrycacheto,mfsopts.attrcacheto,mfsopts.xattrcacheto,mfsopts.groupscacheto,mfsopts.mkdircopysgid,mfsopts.sugidclearmode,1,mfsopts.fsyncmintime,mfsopts.noxattrs,mfsopts.noposixlocks,mfsopts.nobsdlocks); //mfsopts.xattraclsupport);
+		mfs_init(mfsopts.debug,mfsopts.keepcache,mfsopts.direntrycacheto,mfsopts.entrycacheto,mfsopts.attrcacheto,mfsopts.xattrcacheto,mfsopts.groupscacheto,mfsopts.mkdircopysgid,mfsopts.sugidclearmode,1,mfsopts.fsyncmintime,mfsopts.noxattrs,mfsopts.noposixlocks,mfsopts.nobsdlocks); //mfsopts.xattraclsupport);
 		se = fuse_lowlevel_new(args, &mfs_oper, sizeof(mfs_oper), (void*)piped);
 #endif
 	}
@@ -1173,6 +1305,7 @@ int mainloop(struct fuse_args *args,const char* mp,int mt,int fg) {
 	}
 #else /* FUSE2 */
 	fuse_session_add_chan(se, ch);
+	mfs_setchan(ch);
 #endif
 
 #if FUSE_VERSION >= 30
@@ -1577,6 +1710,8 @@ int main(int argc, char *argv[]) {
 	mfsopts.readaheadsize = 0;
 	mfsopts.readaheadleng = 0;
 	mfsopts.readaheadtrigger = 0;
+	mfsopts.erroronlostchunk = 0;
+	mfsopts.erroronnospace = 0;
 	mfsopts.ioretries = 30;
 	mfsopts.timeout = 0;
 	mfsopts.logretry = 5;
@@ -1823,6 +1958,23 @@ int main(int argc, char *argv[]) {
 	if (mfsopts.fsyncbeforeclose) {
 		mfsopts.fsyncmintime=0.0;
 	}
+
+#define TIMEOUT_CLAMP(option,name,max) \
+	if ((option) > (max)) { \
+		fprintf(stderr,name " cache timeout too big (%.2lf) - decreased to %.2lf\n",(option),(max)); \
+		(option) = (max); \
+	} \
+	if ((option) < 0.0) { \
+		fprintf(stderr,"negative value of " name " cache timeout - set to 0\n"); \
+		(option) = 0.0; \
+	}
+
+	TIMEOUT_CLAMP(mfsopts.attrcacheto,"attribute",86400.0);
+	TIMEOUT_CLAMP(mfsopts.xattrcacheto,"xattr",86400.0);
+	TIMEOUT_CLAMP(mfsopts.entrycacheto,"entry",86400.0);
+	TIMEOUT_CLAMP(mfsopts.direntrycacheto,"directory entry",86400.0);
+	TIMEOUT_CLAMP(mfsopts.negentrycacheto,"non existing entry",86400.0);
+	TIMEOUT_CLAMP(mfsopts.groupscacheto,"auxiliary groups",86400.0);
 
 	if (csorder_init(mfsopts.preferedlabels)<0) {
 		fprintf(stderr,"error parsing preferred labels expression\nsee: %s -h for help\n",argv[0]);

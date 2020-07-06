@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -408,7 +408,6 @@ void matomlserv_get_config(matomlserventry *eptr,const uint8_t *data,uint32_t le
 	put8bit(&ptr,vleng);
 	memcpy(ptr,val,vleng);
 }
-
 
 void matomlserv_register(matomlserventry *eptr,const uint8_t *data,uint32_t length) {
 	uint8_t rversion;
@@ -1020,7 +1019,7 @@ void matomlserv_serve(struct pollfd *pdesc) {
 
 // write
 	for (eptr=matomlservhead ; eptr ; eptr=eptr->next) {
-		if ((eptr->lastwrite+(eptr->timeout/3.0))<now && eptr->outputhead==NULL) {
+		if ((eptr->lastwrite+(eptr->timeout/3.0))<now && eptr->outputhead==NULL && eptr->clienttype!=UNKNOWN) {
 			matomlserv_createpacket(eptr,ANTOAN_NOP,0);
 		}
 		if (eptr->pdescpos>=0) {
@@ -1056,7 +1055,7 @@ void matomlserv_keep_alive(void) {
 	}
 // write
 	for (eptr=matomlservhead ; eptr ; eptr=eptr->next) {
-		if ((eptr->lastwrite+(eptr->timeout/3.0))<now && eptr->outputhead==NULL) {
+		if ((eptr->lastwrite+(eptr->timeout/3.0))<now && eptr->outputhead==NULL && eptr->clienttype!=UNKNOWN) {
 			matomlserv_createpacket(eptr,ANTOAN_NOP,0);
 		}
 		if (eptr->mode == DATA && eptr->outputhead) {

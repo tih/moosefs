@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2019 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -1313,6 +1313,9 @@ static inline void fsnodes_node_add(fsnode *p) {
 // returns 1 only if f is ancestor of p
 static inline int fsnodes_isancestor(fsnode *f,fsnode *p) {
 	fsedge *e;
+	if (p->type==TYPE_TRASH || p->type==TYPE_SUSTAINED || f->type!=TYPE_DIRECTORY) {
+		return 0;
+	}
 	for (e=p->parents ; e ; e=e->nextparent) {	// check all parents of 'p' because 'p' can be any object, so it can be hardlinked
 		p=e->parent;	// warning !!! since this point 'p' is used as temporary variable
 		while (p) {
@@ -2106,6 +2109,7 @@ static inline void fsnodes_fill_attr(fsnode *node,fsnode *parent,uint32_t uid,ui
 	if ((node->eattr&(EATTR_NOOWNER|EATTR_NOACACHE)) || (sesflags&SESFLAG_MAPALL)) {
 		flags |= MATTR_NOACACHE;
 	}
+	/* MATTR_ALLOWDATACACHE,MATTR_DIRECTMODE: deprecated flags - moved to open/lookup flags */
 	if ((node->eattr&EATTR_NODATACACHE)==0) {
 		flags |= MATTR_ALLOWDATACACHE;
 	} else {
@@ -2113,6 +2117,9 @@ static inline void fsnodes_fill_attr(fsnode *node,fsnode *parent,uint32_t uid,ui
 	}
 	if (node->xattrflag==0 && node->aclpermflag==0 && node->acldefflag==0) {
 		flags |= MATTR_NOXATTR;
+	}
+	if (node->eattr&(EATTR_UNDELETABLE|EATTR_IMMUTABLE|EATTR_APPENDONLY)) {
+		flags |= MATTR_UNDELETABLE;
 	}
 	if (node->aclpermflag) {
 		mode = (posix_acl_getmode(node->inode) & 0777) | (node->mode & 07000);
@@ -2401,9 +2408,9 @@ static inline fsnode* fsnodes_create_node(uint32_t ts,fsnode* node,uint16_t nlen
 		p->trashtime = DEFAULT_TRASHTIME;
 	}
 	if (type==TYPE_DIRECTORY) {
-		p->eattr = node->eattr & ~(EATTR_SNAPSHOT);
+		p->eattr = node->eattr & ~(EATTR_SNAPSHOT|EATTR_UNDELETABLE|EATTR_APPENDONLY|EATTR_IMMUTABLE);
 	} else {
-		p->eattr = node->eattr & ~(EATTR_NOECACHE|EATTR_SNAPSHOT);
+		p->eattr = node->eattr & ~(EATTR_NOECACHE|EATTR_SNAPSHOT|EATTR_UNDELETABLE|EATTR_APPENDONLY|EATTR_IMMUTABLE);
 	}
 	p->winattr = 0;
 	if (node->acldefflag) {
@@ -2787,7 +2794,11 @@ static inline uint8_t fsnodes_append_slice_of_chunks(uint32_t ts,fsnode *dstobj,
 		return MFS_ERROR_EINVAL;
 	}
 
-	srcchunks = (slice_to - slice_from) + 1;
+	if (srcobj->data.fdata.length>0) {
+		srcchunks = (slice_to - slice_from) + 1;
+	} else {
+		srcchunks = 0;
+	}
 
 	if (dstobj->data.fdata.length>0) {
 		dstchunks = 1+((dstobj->data.fdata.length-1)>>MFSCHUNKBITS);
@@ -2830,7 +2841,11 @@ static inline uint8_t fsnodes_append_slice_of_chunks(uint32_t ts,fsnode *dstobj,
 	}
 
 	for (i=0 ; i<srcchunks ; i++) {
-		chunkid = srcobj->data.fdata.chunktab[slice_from+i];
+		if (slice_from+i < srcobj->data.fdata.chunks) {
+			chunkid = srcobj->data.fdata.chunktab[slice_from+i];
+		} else {
+			chunkid = 0;
+		}
 		dstobj->data.fdata.chunktab[i+dstchunks] = chunkid;
 		if (chunkid>0) {
 			if (chunk_add_file(chunkid,dstobj->sclassid)!=MFS_STATUS_OK) {
@@ -3181,6 +3196,9 @@ static inline uint8_t fsnodes_undel(uint32_t ts,fsnode *node) {
 		if (p->data.ddata.quota && p->data.ddata.quota->exceeded) {
 			return MFS_ERROR_QUOTA;
 		}
+		if (p->eattr & EATTR_IMMUTABLE) {
+			return MFS_ERROR_EPERM;
+		}
 		partleng=0;
 		while (partleng<pleng && path[partleng]!='/') {
 			partleng++;
@@ -3298,12 +3316,12 @@ static inline void fsnodes_gettrashtime_recursive(fsnode *node,uint8_t gmode,bst
 	}
 }
 
-static inline void fsnodes_geteattr_recursive(fsnode *node,uint8_t gmode,uint32_t feattrtab[32],uint32_t deattrtab[32]) {
+static inline void fsnodes_geteattr_recursive(fsnode *node,uint8_t gmode,uint32_t feattrtab[1<<EATTR_BITS],uint32_t deattrtab[1<<EATTR_BITS]) {
 	fsedge *e;
 
 	fsnodes_keep_alive_check();
 	if (node->type!=TYPE_DIRECTORY) {
-		feattrtab[(node->eattr)&(EATTR_NOOWNER|EATTR_NOACACHE|EATTR_NODATACACHE|EATTR_SNAPSHOT)]++;
+		feattrtab[(node->eattr)&(EATTR_NOOWNER|EATTR_NOACACHE|EATTR_NODATACACHE|EATTR_SNAPSHOT|EATTR_UNDELETABLE|EATTR_APPENDONLY|EATTR_IMMUTABLE)]++;
 	} else {
 		deattrtab[(node->eattr)]++;
 		if (gmode==GMODE_RECURSIVE) {
@@ -3377,7 +3395,7 @@ static inline uint64_t fsnodes_setsclass_recursive_test_quota(fsnode *node,uint3
 		(*realsize) += rs;
 		return 0;
 	} else if (node->type==TYPE_FILE || node->type==TYPE_TRASH || node->type==TYPE_SUSTAINED) {
-		if (!((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid)) {
+		if (!((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) && (node->eattr&EATTR_IMMUTABLE)==0) {
 			if (goal>sclass_get_keepmax_goal(node->sclassid)) {
 				size = 0;
 				if (node->data.fdata.length>0) {
@@ -3415,7 +3433,7 @@ static inline void fsnodes_setsclass_recursive(fsnode *node,uint32_t ts,uint32_t
 
 	fsnodes_keep_alive_check();
 	if (node->type==TYPE_FILE || node->type==TYPE_DIRECTORY || node->type==TYPE_TRASH || node->type==TYPE_SUSTAINED) {
-		if (((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) || ((sclass_is_admin_only(node->sclassid) || sclass_is_admin_only(dst_sclassid)) && admin==0)) {
+		if (((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) || (node->eattr&EATTR_IMMUTABLE) || ((sclass_is_admin_only(node->sclassid) || sclass_is_admin_only(dst_sclassid)) && admin==0)) {
 			(*nsinodes)++;
 		} else {
 			set=0;
@@ -3470,7 +3488,7 @@ static inline void fsnodes_settrashtime_recursive(fsnode *node,uint32_t ts,uint3
 
 	fsnodes_keep_alive_check();
 	if (node->type==TYPE_FILE || node->type==TYPE_DIRECTORY || node->type==TYPE_TRASH || node->type==TYPE_SUSTAINED) {
-		if ((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) {
+		if (((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) || (node->eattr&EATTR_IMMUTABLE)) {
 			(*nsinodes)++;
 		} else {
 			set=0;
@@ -3514,7 +3532,7 @@ static inline void fsnodes_seteattr_recursive(fsnode *node,uint32_t ts,uint32_t 
 	uint8_t neweattr,seattr;
 
 	fsnodes_keep_alive_check();
-	if ((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) {
+	if (((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) || ((node->eattr&EATTR_IMMUTABLE) && (eattr&EATTR_NOOWNER))) {
 		(*nsinodes)++;
 	} else {
 		seattr = eattr;
@@ -3559,7 +3577,7 @@ static inline void fsnodes_chgarch_recursive(fsnode *node,uint32_t ts,uint32_t u
 
 	fsnodes_keep_alive_check();
 	if (node->type==TYPE_FILE || node->type==TYPE_TRASH || node->type==TYPE_SUSTAINED) {
-		if ((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) {
+		if (((node->eattr&EATTR_NOOWNER)==0 && uid!=0 && node->uid!=uid) || (node->eattr&EATTR_IMMUTABLE)) {
 			(*nsinodes)++;
 		} else {
 			aflagchanged = 0;
@@ -3608,7 +3626,9 @@ static inline uint8_t fsnodes_remove_snapshot_test(fsedge *e,fsnodes_snapshot_pa
 	n = e->child;
 	fsnodes_keep_alive_check();
 	if (n->type == TYPE_DIRECTORY) {
-		if (fsnodes_access_ext(n,args->uid,args->gids,args->gid,MODE_MASK_W|MODE_MASK_X,args->sesflags)) {
+		if (n->eattr & EATTR_APPENDONLY) {
+			return MFS_ERROR_EPERM;
+		} else if (fsnodes_access_ext(n,args->uid,args->gids,args->gid,MODE_MASK_W|MODE_MASK_X,args->sesflags)) {
 			for (ie = n->data.ddata.children ; ie ; ie=ie->nextchild) {
 				status = fsnodes_remove_snapshot_test(ie,args);
 				if (status!=MFS_STATUS_OK) {
@@ -3619,13 +3639,13 @@ static inline uint8_t fsnodes_remove_snapshot_test(fsedge *e,fsnodes_snapshot_pa
 			return MFS_ERROR_EACCES;
 		}
 	}
-	if ((n->eattr & EATTR_SNAPSHOT) == 0) {
+	if ((n->eattr & EATTR_SNAPSHOT) == 0 || (n->eattr & (EATTR_UNDELETABLE|EATTR_IMMUTABLE|EATTR_APPENDONLY)) != 0) {
 		return MFS_ERROR_EPERM;
 	}
 	return MFS_STATUS_OK;
 }
 
-static inline void fsnodes_remove_snapshot(fsedge *e,fsnodes_snapshot_params *args) {
+static inline void fsnodes_remove_snapshot(fsedge *e,fsnodes_snapshot_params *args,uint8_t remove_allowed) {
 	uint8_t eattr_back;
 	fsnode *n;
 	fsedge *ie,*ien;
@@ -3636,7 +3656,7 @@ static inline void fsnodes_remove_snapshot(fsedge *e,fsnodes_snapshot_params *ar
 		if (fsnodes_access_ext(n,args->uid,args->gids,args->gid,MODE_MASK_W|MODE_MASK_X,args->sesflags)) {
 			for (ie = n->data.ddata.children ; ie ; ie=ien) {
 				ien = ie->nextchild;
-				fsnodes_remove_snapshot(ie,args);
+				fsnodes_remove_snapshot(ie,args,(n->eattr&(EATTR_APPENDONLY|EATTR_IMMUTABLE))?0:1);
 			}
 		}
 		if (n->data.ddata.children!=NULL) {
@@ -3644,7 +3664,7 @@ static inline void fsnodes_remove_snapshot(fsedge *e,fsnodes_snapshot_params *ar
 		}
 		n->eattr = eattr_back;
 	}
-	if (n->eattr & EATTR_SNAPSHOT) {
+	if ((n->eattr & EATTR_SNAPSHOT) != 0 && (n->eattr & (EATTR_UNDELETABLE|EATTR_IMMUTABLE|EATTR_APPENDONLY))==0 && remove_allowed) {
 		n->trashtime = 0;
 		args->inode_chksum ^= n->inode;
 		args->removed_object++;
@@ -3893,6 +3913,9 @@ static inline uint8_t fsnodes_snapshot_test(fsnode *origsrcnode,fsnode *srcnode,
 		dstnode = e->child;
 		if (dstnode==origsrcnode) {
 			return MFS_ERROR_EINVAL;
+		}
+		if (dstnode->eattr&(EATTR_UNDELETABLE|EATTR_IMMUTABLE|EATTR_APPENDONLY)) {
+			return MFS_ERROR_EPERM;
 		}
 		if (dstnode->type!=srcnode->type) {
 			return MFS_ERROR_EPERM;
@@ -4530,13 +4553,16 @@ uint8_t fs_access(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t ui
 	if ((sesflags&SESFLAG_READONLY) && (modemask&MODE_MASK_W)) {
 		return MFS_ERROR_EROFS;
 	}
-	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,0)==0) {
+	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,1)==0) {
 		return MFS_ERROR_ENOENT;
+	}
+	if ((p->eattr&EATTR_IMMUTABLE) && (modemask&MODE_MASK_W)) {
+		return MFS_ERROR_EPERM;
 	}
 	return fsnodes_access_ext(p,uid,gids,gid,modemask,sesflags)?MFS_STATUS_OK:MFS_ERROR_EACCES;
 }
 
-uint8_t fs_lookup(uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE],uint8_t *accmode,uint8_t *filenode,uint8_t *validchunk,uint64_t *chunkid) {
+uint8_t fs_lookup(uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE],uint16_t *accmode,uint8_t *filenode,uint8_t *validchunk,uint64_t *chunkid) {
 	fsnode *wd,*rn,*p;
 	fsedge *e;
 
@@ -4603,6 +4629,16 @@ uint8_t fs_lookup(uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t n
 	fsnodes_fill_attr(p,wd,uid,gid[0],auid,agid,sesflags,attr,1);
 	if (accmode!=NULL) {
 		*accmode = fsnodes_accessmode(p,uid,gids,gid,sesflags);
+		if (p->eattr&EATTR_IMMUTABLE) {
+			(*accmode) &= LOOKUP_ACCESS_MODES_RO; // remove W access - for old clients
+			(*accmode) |= LOOKUP_IMMUTABLE;
+		}
+		if (p->eattr&EATTR_APPENDONLY) {
+			(*accmode) |= LOOKUP_APPENDONLY;
+		}
+		if (p->eattr&EATTR_NODATACACHE) {
+			(*accmode) |= LOOKUP_DIRECTMODE;
+		}
 	}
 	if (validchunk!=NULL && chunkid!=NULL) {
 		*validchunk = 0;
@@ -4635,14 +4671,19 @@ uint8_t fs_getattr(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t op
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint64_t length,uint8_t attr[ATTR_RECORD_SIZE],uint32_t *indx,uint64_t *prevchunkid,uint64_t *chunkid) {
+uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gids,uint32_t *gid,uint8_t disflags,uint64_t length,uint32_t *indx,uint64_t *prevchunkid,uint64_t *chunkid) {
 	fsnode *p;
-	memset(attr,0,ATTR_RECORD_SIZE);
 	if (sesflags&SESFLAG_READONLY) {
 		return MFS_ERROR_EROFS;
 	}
 	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,flags & TRUNCATE_FLAG_OPENED)==0) {
 		return MFS_ERROR_ENOENT;
+	}
+	if (p->eattr & EATTR_IMMUTABLE) {
+		return MFS_ERROR_EPERM;
+	}
+	if ((p->eattr & EATTR_APPENDONLY) && (flags & (TRUNCATE_FLAG_RESERVE|TRUNCATE_FLAG_UPDATE))==0) {
+		return MFS_ERROR_EPERM;
 	}
 	if ((flags & TRUNCATE_FLAG_OPENED)==0) {
 		if (!fsnodes_access_ext(p,uid,gids,gid,MODE_MASK_W,sesflags)) {
@@ -4654,6 +4695,23 @@ uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint
 	}
 	if (flags & TRUNCATE_FLAG_UPDATE) {
 		return MFS_STATUS_OK;
+	}
+	if (flags & TRUNCATE_FLAG_RESERVE) { // this is not real truncate - this is part of write
+		if (length + p->data.fdata.length < length) {
+			return MFS_ERROR_INDEXTOOBIG;
+		}
+		length += p->data.fdata.length;
+	} else {
+		if (disflags&1) { // truncate (decrease file size) not allowed in session
+			if (length<p->data.fdata.length) {
+				return MFS_ERROR_EPERM;
+			}
+		}
+		if (disflags&2) { // setlength (increase file size) not allowed in session
+			if (length>p->data.fdata.length) {
+				return MFS_ERROR_EPERM;
+			}
+		}
 	}
 	if (length>p->data.fdata.length) {
 		uint32_t lastchunk_pre,lastchunksize_pre,lastchunk_post,lastchunksize_post;
@@ -4671,6 +4729,9 @@ uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint
 		} else {
 			lastchunk_post = 0;
 			lastchunksize_post = MFSHDRSIZE;
+		}
+		if (lastchunk_post > MAX_INDEX) {
+			return MFS_ERROR_INDEXTOOBIG;
 		}
 		if (p->data.fdata.chunktab==NULL || p->data.fdata.chunktab[lastchunk_pre]==0) {
 			size_diff = 0;
@@ -4706,7 +4767,6 @@ uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint
 			}
 		}
 	}
-	fsnodes_fill_attr(p,NULL,uid,gid[0],auid,agid,sesflags,attr,1);
 	stats_setattr++;
 	return MFS_STATUS_OK;
 }
@@ -4752,14 +4812,18 @@ uint8_t fs_mr_unlock(uint64_t chunkid) {
 	return status;
 }
 
-uint8_t fs_do_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gid,uint32_t auid,uint32_t agid,uint64_t length,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_do_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t flags,uint32_t uid,uint32_t gid,uint32_t auid,uint32_t agid,uint64_t length,uint8_t attr[ATTR_RECORD_SIZE],uint64_t *prevlength) {
 	fsnode *p;
 	uint32_t ts = main_time();
 	uint8_t chtime = 1;
 
 	memset(attr,0,ATTR_RECORD_SIZE);
-	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,0)==0) {
+	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,flags & TRUNCATE_FLAG_OPENED)==0) {
 		return MFS_ERROR_ENOENT;
+	}
+	*prevlength = p->data.fdata.length;
+	if (flags & TRUNCATE_FLAG_RESERVE) {
+		length += p->data.fdata.length;
 	}
 	if (flags & TRUNCATE_FLAG_UPDATE) {
 		if (length>p->data.fdata.length) {
@@ -4794,6 +4858,9 @@ uint8_t fs_setattr(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t op
 	}
 	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,opened)==0) {
 		return MFS_ERROR_ENOENT;
+	}
+	if (p->eattr&EATTR_IMMUTABLE) {
+		return MFS_ERROR_EPERM;
 	}
 	if (!(uid!=0 && setmask==SET_MODE_FLAG && attrmode==(p->mode&01777) && (p->mode&06000)!=0)) { // ignore permission tests for special case - clear suid/sgid during write
 		if (uid!=0 && (sesflags&SESFLAG_MAPALL) && (setmask&(SET_UID_FLAG|SET_GID_FLAG))) {
@@ -5022,6 +5089,9 @@ uint8_t fs_univ_symlink(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t
 	if (wd->type!=TYPE_DIRECTORY) {
 		return MFS_ERROR_ENOTDIR;
 	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (wd->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
+	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(wd,uid,gids,gid,MODE_MASK_W|MODE_MASK_X,sesflags))) {
 		return MFS_ERROR_EACCES;
 	}
@@ -5076,7 +5146,7 @@ uint8_t fs_mr_symlink(uint32_t ts,uint32_t parent,uint32_t nleng,const uint8_t *
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_univ_create(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint8_t type,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t rdev,uint8_t copysgid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_univ_create(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint8_t type,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t rdev,uint8_t copysgid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE],uint8_t *oflags) {
 	fsnode *wd,*p;
 	*inode = 0;
 	if (attr) {
@@ -5093,6 +5163,9 @@ uint8_t fs_univ_create(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t 
 	}
 	if (wd->type!=TYPE_DIRECTORY) {
 		return MFS_ERROR_ENOTDIR;
+	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (wd->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
 	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(wd,uid,gids,gid,MODE_MASK_W|MODE_MASK_X,sesflags))) {
 		return MFS_ERROR_EACCES;
@@ -5115,6 +5188,15 @@ uint8_t fs_univ_create(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t 
 		if (attr) {
 			fsnodes_fill_attr(p,wd,uid,gid[0],auid,agid,sesflags,attr,1);
 		}
+		if (oflags) {
+			*oflags = 0;
+			if (p->eattr&(EATTR_NODATACACHE)) {
+				(*oflags) |= OPEN_DIRECTMODE;
+			}
+			if (p->eattr&(EATTR_APPENDONLY)) {
+				(*oflags) |= OPEN_APPENDONLY;
+			}
+		}
 		changelog("%"PRIu32"|CREATE(%"PRIu32",%s,%"PRIu8",%"PRIu16",%"PRIu16",%"PRIu32",%"PRIu32",%"PRIu32"):%"PRIu32,ts,parent,changelog_escape_name(nleng,name),type,mode,cumask,uid,gid[0],rdev,p->inode);
 	} else {
 		meta_version_inc();
@@ -5127,15 +5209,15 @@ uint8_t fs_univ_create(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t 
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_mknod(uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint8_t type,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t rdev,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_mknod(uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint8_t type,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t rdev,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE],uint8_t *oflags) {
 	if (type>15) {
 		type = fsnodes_type_convert(type);
 	}
-	return fs_univ_create(main_time(),rootinode,sesflags,parent,nleng,name,type,mode,cumask,uid,gids,gid,auid,agid,rdev,0,inode,attr);
+	return fs_univ_create(main_time(),rootinode,sesflags,parent,nleng,name,type,mode,cumask,uid,gids,gid,auid,agid,rdev,0,inode,attr,oflags);
 }
 
 uint8_t fs_mkdir(uint32_t rootinode,uint8_t sesflags,uint32_t parent,uint16_t nleng,const uint8_t *name,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint8_t copysgid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
-	return fs_univ_create(main_time(),rootinode,sesflags,parent,nleng,name,TYPE_DIRECTORY,mode,cumask,uid,gids,gid,auid,agid,0,copysgid,inode,attr);
+	return fs_univ_create(main_time(),rootinode,sesflags,parent,nleng,name,TYPE_DIRECTORY,mode,cumask,uid,gids,gid,auid,agid,0,copysgid,inode,attr,NULL);
 }
 
 uint8_t fs_mr_create(uint32_t ts,uint32_t parent,uint32_t nleng,const uint8_t *name,uint8_t type,uint16_t mode,uint16_t cumask,uint32_t uid,uint32_t gid,uint32_t rdev,uint32_t inode) {
@@ -5144,7 +5226,7 @@ uint8_t fs_mr_create(uint32_t ts,uint32_t parent,uint32_t nleng,const uint8_t *n
 	if (type>15) {
 		type = fsnodes_type_convert(type);
 	}
-	status = fs_univ_create(ts,0,SESFLAG_METARESTORE,parent,nleng,name,type,mode,cumask,uid,1,&gid,0,0,rdev,0,&rinode,NULL);
+	status = fs_univ_create(ts,0,SESFLAG_METARESTORE,parent,nleng,name,type,mode,cumask,uid,1,&gid,0,0,rdev,0,&rinode,NULL,NULL);
 	if (status!=MFS_STATUS_OK) {
 		return status;
 	}
@@ -5167,6 +5249,9 @@ uint8_t fs_univ_unlink(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t 
 	if (wd->type!=TYPE_DIRECTORY) {
 		return MFS_ERROR_ENOTDIR;
 	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (wd->eattr & (EATTR_IMMUTABLE|EATTR_APPENDONLY))) {
+		return MFS_ERROR_EPERM;
+	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(wd,uid,gids,gid,MODE_MASK_W|MODE_MASK_X,sesflags))) {
 		return MFS_ERROR_EACCES;
 	}
@@ -5178,6 +5263,9 @@ uint8_t fs_univ_unlink(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t 
 		return MFS_ERROR_ENOENT;
 	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_sticky_access(wd,e->child,uid))) {
+		return MFS_ERROR_EPERM;
+	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (e->child->eattr&(EATTR_UNDELETABLE|EATTR_IMMUTABLE|EATTR_APPENDONLY))) {
 		return MFS_ERROR_EPERM;
 	}
 	if ((sesflags&SESFLAG_METARESTORE)==0) {
@@ -5242,7 +5330,7 @@ uint8_t fs_mr_unlink(uint32_t ts,uint32_t parent,uint32_t nleng,const uint8_t *n
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t parent_src,uint16_t nleng_src,const uint8_t *name_src,uint32_t parent_dst,uint16_t nleng_dst,const uint8_t *name_dst,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t parent_src,uint16_t nleng_src,const uint8_t *name_src,uint32_t parent_dst,uint16_t nleng_dst,const uint8_t *name_dst,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint8_t delflags,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
 	fsnode *swd;
 	fsedge *se;
 	fsnode *dwd;
@@ -5262,6 +5350,9 @@ uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t pa
 	if (swd->type!=TYPE_DIRECTORY) {
 		return MFS_ERROR_ENOTDIR;
 	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (swd->eattr & (EATTR_IMMUTABLE|EATTR_APPENDONLY))) {
+		return MFS_ERROR_EPERM;
+	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(swd,uid,gids,gid,MODE_MASK_W|MODE_MASK_X,sesflags))) {
 		return MFS_ERROR_EACCES;
 	}
@@ -5279,8 +5370,14 @@ uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t pa
 	if (dwd->type!=TYPE_DIRECTORY) {
 		return MFS_ERROR_ENOTDIR;
 	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (dwd->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
+	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(dwd,uid,gids,gid,MODE_MASK_W|MODE_MASK_X,sesflags))) {
 		return MFS_ERROR_EACCES;
+	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (node->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
 	}
 	if (node->type==TYPE_DIRECTORY) {
 		if (fsnodes_isancestor(node,dwd)) {
@@ -5294,6 +5391,18 @@ uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t pa
 		return MFS_ERROR_EINVAL;
 	}
 	de = fsnodes_lookup(dwd,nleng_dst,name_dst);
+	if (de) {
+		if (delflags&1) { // unlink is not allowed in this session
+			if (de->child->type!=TYPE_DIRECTORY) {
+				return MFS_ERROR_EPERM;
+			}
+		}
+		if (delflags&2) { // rmdir is not allowed in this session
+			if (de->child->type==TYPE_DIRECTORY) {
+				return MFS_ERROR_EPERM;
+			}
+		}
+	}
 	if ((sesflags&SESFLAG_METARESTORE)==0) {
 		fsnodes_get_stats(node,&ssr,2);
 		if (de) {
@@ -5330,6 +5439,9 @@ uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t pa
 		if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_sticky_access(dwd,de->child,uid))) {
 			return MFS_ERROR_EPERM;
 		}
+		if ((sesflags&SESFLAG_METARESTORE)==0 && (de->child->eattr&(EATTR_UNDELETABLE|EATTR_IMMUTABLE|EATTR_APPENDONLY))) {
+			return MFS_ERROR_EPERM;
+		}
 		fsnodes_unlink(ts,de);
 	}
 	fsnodes_remove_edge(ts,se);
@@ -5347,14 +5459,14 @@ uint8_t fs_univ_move(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t pa
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_rename(uint32_t rootinode,uint8_t sesflags,uint32_t parent_src,uint16_t nleng_src,const uint8_t *name_src,uint32_t parent_dst,uint16_t nleng_dst,const uint8_t *name_dst,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
-	return fs_univ_move(main_time(),rootinode,sesflags,parent_src,nleng_src,name_src,parent_dst,nleng_dst,name_dst,uid,gids,gid,auid,agid,inode,attr);
+uint8_t fs_rename(uint32_t rootinode,uint8_t sesflags,uint32_t parent_src,uint16_t nleng_src,const uint8_t *name_src,uint32_t parent_dst,uint16_t nleng_dst,const uint8_t *name_dst,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint8_t delflags,uint32_t *inode,uint8_t attr[ATTR_RECORD_SIZE]) {
+	return fs_univ_move(main_time(),rootinode,sesflags,parent_src,nleng_src,name_src,parent_dst,nleng_dst,name_dst,uid,gids,gid,auid,agid,delflags,inode,attr);
 }
 
 uint8_t fs_mr_move(uint32_t ts,uint32_t parent_src,uint32_t nleng_src,const uint8_t *name_src,uint32_t parent_dst,uint32_t nleng_dst,const uint8_t *name_dst,uint32_t inode) {
 	uint32_t rinode;
 	uint8_t status;
-	status = fs_univ_move(ts,0,SESFLAG_METARESTORE,parent_src,nleng_src,name_src,parent_dst,nleng_dst,name_dst,0,0,0,0,0,&rinode,NULL);
+	status = fs_univ_move(ts,0,SESFLAG_METARESTORE,parent_src,nleng_src,name_src,parent_dst,nleng_dst,name_dst,0,0,0,0,0,0,&rinode,NULL);
 	if (status!=MFS_STATUS_OK) {
 		return status;
 	}
@@ -5380,6 +5492,9 @@ uint8_t fs_univ_link(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t in
 	}
 	if (fsnodes_node_find_ext(rootinode,sesflags,&inode_src,NULL,&sp,0)==0 || fsnodes_node_find_ext(rootinode,sesflags,&parent_dst,NULL,&dwd,0)==0) {
 		return MFS_ERROR_ENOENT;
+	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (sp->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
 	}
 	nlink = 0;
 	switch (sp->type) {
@@ -5408,6 +5523,9 @@ uint8_t fs_univ_link(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_t in
 	}
 	if (dwd->type!=TYPE_DIRECTORY) {
 		return MFS_ERROR_ENOTDIR;
+	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (dwd->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
 	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(dwd,uid,gids,gid,MODE_MASK_W|MODE_MASK_X,sesflags))) {
 		return MFS_ERROR_EACCES;
@@ -5506,18 +5624,24 @@ uint8_t fs_univ_snapshot(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_
 		}
 		fsnodes_keep_alive_begin();
 		if ((smode & SNAPSHOT_MODE_FORCE_REMOVAL)==0 && (sesflags&SESFLAG_METARESTORE)==0) {
+			if (dwd->eattr&(EATTR_APPENDONLY|EATTR_IMMUTABLE)) {
+				return MFS_ERROR_EPERM;
+			}
 			status = fsnodes_remove_snapshot_test(e,&args);
 			if (status!=MFS_STATUS_OK) {
 				return status;
 			}
 		}
-		fsnodes_remove_snapshot(e,&args);
+		fsnodes_remove_snapshot(e,&args,(dwd->eattr&(EATTR_APPENDONLY|EATTR_IMMUTABLE))?0:1);
 	} else {
 		if (inode_src==0) {
 			return MFS_ERROR_EINVAL;
 		}
 		if (fsnodes_node_find_ext(rootinode,sesflags,&inode_src,NULL,&sp,0)==0 || fsnodes_node_find_ext(rootinode,sesflags,&parent_dst,NULL,&dwd,0)==0) {
 			return MFS_ERROR_ENOENT;
+		}
+		if ((sesflags&SESFLAG_METARESTORE)==0 && dwd->eattr&EATTR_IMMUTABLE) {
+			return MFS_ERROR_EPERM;
 		}
 		if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(sp,uid,gids,gid,MODE_MASK_R,sesflags))) {
 			return MFS_ERROR_EACCES;
@@ -5631,6 +5755,9 @@ uint8_t fs_univ_append_slice(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uin
 	if (p->type!=TYPE_FILE && p->type!=TYPE_TRASH && p->type!=TYPE_SUSTAINED) {
 		return MFS_ERROR_EPERM;
 	}
+	if ((sesflags&SESFLAG_METARESTORE)==0 && (p->eattr & EATTR_IMMUTABLE)) {
+		return MFS_ERROR_EPERM;
+	}
 	if ((sesflags&SESFLAG_METARESTORE)==0 && (!fsnodes_access_ext(p,uid,gids,gid,MODE_MASK_W,sesflags))) {
 		return MFS_ERROR_EACCES;
 	}
@@ -5645,6 +5772,7 @@ uint8_t fs_univ_append_slice(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uin
 	if ((sesflags&SESFLAG_METARESTORE)==0) {
 		// fix slices and check quota
 		lastsrcchunk = (sp->data.fdata.length-1)>>MFSCHUNKBITS;
+		// convert slice_from and slice_to from user notation (with negative values) to absolute positive number of chunks
 		if (flags&APPEND_SLICE_FROM_NEG) {
 			if (slice_from>lastsrcchunk+1) {
 				slice_from = 0;
@@ -5662,7 +5790,14 @@ uint8_t fs_univ_append_slice(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uin
 				slice_to = lastsrcchunk+1-slice_to;
 			}
 		}
-		slice_to--; // change [from,to) -> [from,to] ; 0 can become 0xFFFFFFFF here - it is ok, because 0 means end of file
+		// do we have anything to append?
+		if (slice_to<=slice_from) {
+			if (fleng!=NULL) {
+				*fleng = p->data.fdata.length;
+			}
+			return MFS_STATUS_OK;
+		}
+		slice_to--; // change [from,to) -> [from,to] ; it is ok because slice_to can't be 0 here
 		if (slice_to>=lastsrcchunk) {
 			slice_to = lastsrcchunk;
 			if (slice_to<slice_from) {
@@ -5834,9 +5969,9 @@ uint8_t fs_checkfile(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_opencheck(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint8_t flags,uint8_t attr[ATTR_RECORD_SIZE]) {
+uint8_t fs_opencheck(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uint32_t auid,uint32_t agid,uint8_t flags,uint8_t attr[ATTR_RECORD_SIZE],uint8_t *oflags) {
 	fsnode *p;
-	if ((sesflags&SESFLAG_READONLY) && (flags&WANT_WRITE)) {
+	if ((sesflags&SESFLAG_READONLY) && (flags&OPEN_WRITE)) {
 		return MFS_ERROR_EROFS;
 	}
 	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,0)==0) {
@@ -5845,19 +5980,41 @@ uint8_t fs_opencheck(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t
 	if (p->type!=TYPE_FILE && p->type!=TYPE_TRASH && p->type!=TYPE_SUSTAINED) {
 		return MFS_ERROR_EPERM;
 	}
-	if ((flags&AFTER_CREATE)==0) {
+	if ((p->eattr & EATTR_IMMUTABLE) && (flags&(OPEN_WRITE|OPEN_TRUNCATE))) {
+		return MFS_ERROR_EPERM;
+	}
+	if ((p->eattr & EATTR_APPENDONLY) && (flags&OPEN_TRUNCATE)) {
+		return MFS_ERROR_EPERM;
+	}
+	if ((flags&OPEN_AFTER_CREATE)==0) {
 		uint8_t modemask=0;
-		if (flags&WANT_READ) {
+		if (flags&OPEN_READ) {
 			modemask|=MODE_MASK_R;
 		}
-		if (flags&WANT_WRITE) {
+		if (flags&OPEN_WRITE) {
 			modemask|=MODE_MASK_W;
 		}
 		if (!fsnodes_access_ext(p,uid,gids,gid,modemask,sesflags)) {
 			return MFS_ERROR_EACCES;
 		}
+		if (flags&OPEN_TRUNCATE) {
+			uint32_t ts = main_time();
+			if (!fsnodes_access_ext(p,uid,gids,gid,MODE_MASK_W,sesflags)) {
+				return MFS_ERROR_EACCES;
+			}
+			fsnodes_setlength(p,0);
+			changelog("%"PRIu32"|LENGTH(%"PRIu32",0,1)",ts,inode);
+			p->ctime = p->mtime = ts;
+		}
 	}
 	fsnodes_fill_attr(p,NULL,uid,gid[0],auid,agid,sesflags,attr,1);
+	*oflags = 0;
+	if (p->eattr&EATTR_NODATACACHE) {
+		*oflags |= OPEN_DIRECTMODE;
+	}
+	if (p->eattr&EATTR_APPENDONLY) {
+		*oflags |= OPEN_APPENDONLY;
+	}
 	stats_open++;
 	return MFS_STATUS_OK;
 }
@@ -5899,7 +6056,7 @@ uint8_t fs_readchunk(uint32_t inode,uint32_t indx,uint8_t chunkopflags,uint64_t 
 	return MFS_STATUS_OK;
 }
 
-uint8_t fs_writechunk(uint32_t inode,uint32_t indx,uint8_t chunkopflags,uint64_t *prevchunkid,uint64_t *chunkid,uint64_t *length,uint8_t *opflag) {
+uint8_t fs_writechunk(uint32_t inode,uint32_t indx,uint8_t chunkopflags,uint64_t *prevchunkid,uint64_t *chunkid,uint64_t *length,uint8_t *opflag,uint32_t clientip) {
 	int status;
 	uint32_t i;
 	uint64_t ochunkid,nchunkid,nlength,lengdiff;
@@ -5919,6 +6076,10 @@ uint8_t fs_writechunk(uint32_t inode,uint32_t indx,uint8_t chunkopflags,uint64_t
 		return MFS_ERROR_ENOENT;
 	}
 	if (p->type!=TYPE_FILE && p->type!=TYPE_TRASH && p->type!=TYPE_SUSTAINED) {
+		return MFS_ERROR_EPERM;
+	}
+	// due to write optimizations we can't check APPENDONLY here
+	if (p->eattr & EATTR_IMMUTABLE) {
 		return MFS_ERROR_EPERM;
 	}
 	if (indx>MAX_INDEX) {
@@ -5979,7 +6140,7 @@ uint8_t fs_writechunk(uint32_t inode,uint32_t indx,uint8_t chunkopflags,uint64_t
 	}
 	ochunkid = p->data.fdata.chunktab[indx];
 	*prevchunkid = ochunkid;
-	status = chunk_multi_modify((chunkopflags&CHUNKOPFLAG_CONTINUEOP)?1:0,&nchunkid,ochunkid,p->sclassid,opflag);
+	status = chunk_multi_modify((chunkopflags&CHUNKOPFLAG_CONTINUEOP)?1:0,&nchunkid,ochunkid,p->sclassid,opflag,clientip);
 	if (status!=MFS_STATUS_OK) {
 		return status;
 	}
@@ -6189,7 +6350,7 @@ void fs_amtime_update(uint32_t rootinode,uint8_t sesflags,uint32_t *inodetab,uin
 	ts = main_time();
 
 	for (i=0 ; i<cnt ; i++) {
-		if (fsnodes_node_find_ext(rootinode,sesflags,inodetab+i,NULL,&p,0)) {
+		if (fsnodes_node_find_ext(rootinode,sesflags,inodetab+i,NULL,&p,1)) {
 			chg = 0;
 			atime = atimetab[i];
 			mtime = mtimetab[i];
@@ -6227,6 +6388,9 @@ uint8_t fs_repair(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t ui
 		return MFS_ERROR_ENOENT;
 	}
 	if (p->type!=TYPE_FILE && p->type!=TYPE_TRASH && p->type!=TYPE_SUSTAINED) {
+		return MFS_ERROR_EPERM;
+	}
+	if (p->eattr & EATTR_IMMUTABLE) {
 		return MFS_ERROR_EPERM;
 	}
 	if (!fsnodes_access_ext(p,uid,gids,gid,MODE_MASK_W,sesflags)) {
@@ -6350,11 +6514,11 @@ void fs_gettrashtime_store(void *fptr,void *dptr,uint8_t *buff) {
 	fsnodes_bst_free(droot);
 }
 
-uint8_t fs_geteattr(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t gmode,uint32_t feattrtab[32],uint32_t deattrtab[32]) {
+uint8_t fs_geteattr(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t gmode,uint32_t feattrtab[1<<EATTR_BITS],uint32_t deattrtab[1<<EATTR_BITS]) {
 	fsnode *p;
 	(void)sesflags;
-	memset(feattrtab,0,32*sizeof(uint32_t));
-	memset(deattrtab,0,32*sizeof(uint32_t));
+	memset(feattrtab,0,(1<<EATTR_BITS)*sizeof(uint32_t));
+	memset(deattrtab,0,(1<<EATTR_BITS)*sizeof(uint32_t));
 	if (!GMODE_ISVALID(gmode)) {
 		return MFS_ERROR_EINVAL;
 	}
@@ -6492,11 +6656,16 @@ uint8_t fs_univ_seteattr(uint32_t ts,uint32_t rootinode,uint8_t sesflags,uint32_
 	*sinodes = 0;
 	*ncinodes = 0;
 	*nsinodes = 0;
-	if (!SMODE_ISVALID(smode) || (eattr&(~(EATTR_NOOWNER|EATTR_NOACACHE|EATTR_NOECACHE|EATTR_NODATACACHE|EATTR_SNAPSHOT)))) {
+	if (!SMODE_ISVALID(smode) || (eattr&(~(EATTR_NOOWNER|EATTR_NOACACHE|EATTR_NOECACHE|EATTR_NODATACACHE|EATTR_SNAPSHOT|EATTR_UNDELETABLE|EATTR_APPENDONLY|EATTR_IMMUTABLE)))) {
 		return MFS_ERROR_EINVAL;
 	}
-	if ((sesflags&SESFLAG_METARESTORE)==0 && (sesflags&SESFLAG_READONLY)) {
-		return MFS_ERROR_EROFS;
+	if ((sesflags&SESFLAG_METARESTORE)==0) {
+		if (sesflags&SESFLAG_READONLY) {
+			return MFS_ERROR_EROFS;
+		}
+		if ((sesflags&SESFLAG_ADMIN)==0 && (eattr&(EATTR_UNDELETABLE|EATTR_APPENDONLY|EATTR_IMMUTABLE))!=0) { // only "admin" is allowed to manipulate UNDELETABLE,APPENDONLY and IMMUTABLE flags
+			return MFS_ERROR_EPERM;
+		}
 	}
 	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,0)==0) {
 		return MFS_ERROR_ENOENT;
@@ -6575,6 +6744,9 @@ uint8_t fs_setxattr(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8_t o
 			return MFS_ERROR_EPERM;
 		}
 	}
+	if (p->eattr & EATTR_IMMUTABLE) {
+		return MFS_ERROR_EPERM;
+	}
 	if (opened==0) {
 		if (!fsnodes_access_ext(p,uid,gids,gid,MODE_MASK_W,sesflags)) {
 			return MFS_ERROR_EACCES;
@@ -6652,6 +6824,9 @@ uint8_t fs_setfacl(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t u
 		return MFS_ERROR_ENOENT;
 	}
 	if ((p->eattr&EATTR_NOOWNER)==0 && uid!=0 && uid!=p->uid) {
+		return MFS_ERROR_EPERM;
+	}
+	if (p->eattr & EATTR_IMMUTABLE) {
 		return MFS_ERROR_EPERM;
 	}
 //	if (opened==0) {
