@@ -1,6 +1,6 @@
 This file lists noteworthy changes in MooseFS.
 
-* MooseFS 3.0.114-1 (WIP)
+* MooseFS 3.0.114-1 (2020-07-27)
 
   - (mount) fixed trunacting files open with O_APPEND flag (bug itntr. in 3.0.113, issue #368)
   - (cs) added disk rebalance when all designated source disks are already empty (issue #364)
@@ -19,6 +19,11 @@ This file lists noteworthy changes in MooseFS.
   - (cs) added logging info when '.chunkdb' is not written to disk
   - (master) fixed alphabetical order of commands detected in changelog
   - (cs) changed queue limit to max workers (limited dynamically)
+  - (cs) fixed automatic chunkserver removal in master
+  - (master) added meta version increment in chunks_set_version
+  - (cs) added error detection during writing '.chunkdb'
+  - (all) added build id to 'what' strings
+  - (nbd+cgiserv) added chdir("/")
 
 * MooseFS 3.0.113-1 (2020-05-04)
 

@@ -82,6 +82,7 @@ enum {
 #include "sizestr.h"
 #include "sockets.h"
 #include "processname.h"
+#include "idstr.h"
 
 #define READ_TOMS 1000
 #define WRITE_TOMS 1000
@@ -471,6 +472,9 @@ void make_daemon(void) {
 		}
 		waitpid(f,&status,0);
 		exit(0);
+	}
+	if (chdir("/")<0) {
+		syslog(LOG_NOTICE,"can't change working directory to '/': %s",strerror(errno));
 	}
 	setsid();
 	setpgid(0,getpid());

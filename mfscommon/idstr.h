@@ -18,43 +18,15 @@
  * or visit http://www.gnu.org/licenses/gpl-2.0.html
  */
 
+#ifndef _IDSTR_H_
+#define _IDSTR_H_
+
 #ifdef HAVE_CONFIG_H
 #include "config.h"
 #endif
 
-#include <stdio.h>
+#define IDSTR_STR_AUX(x) #x
+#define IDSTR_STR(x) IDSTR_STR_AUX(x)
+const char id[]="@(#) version: " VERSSTR ", build: " IDSTR_STR(BUILDNO) ", written by Jakub Kruszona-Zawadzki";
 
-#include "bgjobs.h"
-#include "random.h"
-#include "hddspacemgr.h"
-#include "masterconn.h"
-#include "csserv.h"
-#include "mainserv.h"
-#include "chartsdata.h"
-
-#define MODULE_OPTIONS_GETOPT ""
-#define MODULE_OPTIONS_SWITCH
-#define MODULE_OPTIONS_SYNOPIS ""
-#define MODULE_OPTIONS_DESC ""
-
-/* Run Tab */
-typedef int (*runfn)(void);
-struct {
-	runfn fn;
-	char *name;
-} RunTab[]={
-	{rnd_init,"random generator"},
-	{hdd_init,"hdd space manager"},
-	{mainserv_init,"main server threads"},
-	{job_init,"jobs manager"},
-	{csserv_init,"main server acceptor"},	/* it has to be before "masterconn" */
-	{masterconn_init,"master connection module"},
-	{chartsdata_init,"charts module"},
-	{(runfn)0,"****"}
-},LateRunTab[]={
-	{hdd_late_init,"hdd space manager - threads"},
-	{(runfn)0,"****"}
-},RestoreRunTab[]={
-	{hdd_restore,"hdd space restore"},
-	{(runfn)0,"****"}
-};
+#endif

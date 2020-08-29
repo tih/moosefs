@@ -31,10 +31,7 @@
 
 #include "MFSCommunication.h"
 #include "datapack.h"
-
-#define STR_AUX(x) #x
-#define STR(x) STR_AUX(x)
-const char id[]="@(#) version: " VERSSTR ", written by Jakub Kruszona-Zawadzki";
+#include "idstr.h"
 
 #define MAX_INDEX 0x7FFFFFFF
 #define MAX_CHUNKS_PER_FILE (MAX_INDEX+1)
@@ -1479,9 +1476,9 @@ void usage(const char *appname) {
 	printf("\tQUOT - quota definitions\n");
 	printf("\tXATR - xattr data\n");
 	printf("\tPACL - posix acl data\n");
+	printf("\tOPEN - open files\n");
 	printf("\tFLCK - flock data\n");
 	printf("\tPLCK - posix locks (lockf,ioctl) data\n");
-	printf("\tOPEN - open files\n");
 	printf("\tCSDB - active chunkservers\n");
 	printf("\tCHNK - chunks\n");
 	exit(1);
