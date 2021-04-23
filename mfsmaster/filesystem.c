@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2021 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -52,6 +52,7 @@
 #include "csdb.h"
 #include "chunks.h"
 #include "filesystem.h"
+#include "appendres.h"
 #include "openfiles.h"
 #include "xattr.h"
 #include "posixacl.h"
@@ -136,6 +137,7 @@ static quotanode *quotahead;
 static uint32_t QuotaDefaultGracePeriod;
 static uint16_t MaxAllowedHardLinks;
 static uint8_t AtimeMode;
+static uint32_t InodeReuseDelay;
 
 typedef struct _fsnode {
 	uint32_t inode;
@@ -833,7 +835,7 @@ void fsnodes_free_id(uint32_t inode,uint32_t ts) {
 	freelastts = ts;
 }
 
-uint8_t fs_univ_freeinodes(uint32_t ts,uint8_t sesflags,uint32_t freeinodes,uint32_t sustainedinodes,uint32_t inode_chksum) {
+uint8_t fs_univ_freeinodes(uint32_t ts,uint8_t sesflags,uint32_t inodereusedelay,uint32_t freeinodes,uint32_t sustainedinodes,uint32_t inode_chksum) {
 	uint32_t si,fi,pos,mask;
 	uint32_t ics;
 	freenode *n,*an;
@@ -847,7 +849,7 @@ uint8_t fs_univ_freeinodes(uint32_t ts,uint8_t sesflags,uint32_t freeinodes,uint
 	if (ts<freelastts) {
 		fsnodes_free_fixts(ts);
 	}
-	while (n && n->ftime+MFS_INODE_REUSE_DELAY<ts) {
+	while (n && n->ftime+inodereusedelay<ts) {
 		ics ^= n->inode;
 		if (((sesflags&SESFLAG_METARESTORE)==0 || sustainedinodes>0) && of_isfileopen(n->inode)) {
 			si++;
@@ -883,7 +885,7 @@ uint8_t fs_univ_freeinodes(uint32_t ts,uint8_t sesflags,uint32_t freeinodes,uint
 	}
 	if ((sesflags&SESFLAG_METARESTORE)==0) {
 		if (fi>0 || si>0) {
-			changelog("%"PRIu32"|FREEINODES():%"PRIu32",%"PRIu32",%"PRIu32,ts,fi,si,ics);
+			changelog("%"PRIu32"|FREEINODES(%"PRIu32"):%"PRIu32",%"PRIu32",%"PRIu32,ts,inodereusedelay,fi,si,ics);
 		}
 	} else {
 		if (freeinodes!=fi || sustainedinodes!=si || (inode_chksum!=0 && inode_chksum!=ics)) {
@@ -896,11 +898,11 @@ uint8_t fs_univ_freeinodes(uint32_t ts,uint8_t sesflags,uint32_t freeinodes,uint
 }
 
 void fsnodes_freeinodes(void) {
-	fs_univ_freeinodes(main_time(),0,0,0,0);
+	fs_univ_freeinodes(main_time(),0,InodeReuseDelay,0,0,0);
 }
 
-uint8_t fs_mr_freeinodes(uint32_t ts,uint32_t freeinodes,uint32_t sustainedinodes,uint32_t inode_chksum) {
-	return fs_univ_freeinodes(ts,SESFLAG_METARESTORE,freeinodes,sustainedinodes,inode_chksum);
+uint8_t fs_mr_freeinodes(uint32_t ts,uint32_t inodereusedelay,uint32_t freeinodes,uint32_t sustainedinodes,uint32_t inode_chksum) {
+	return fs_univ_freeinodes(ts,SESFLAG_METARESTORE,inodereusedelay,freeinodes,sustainedinodes,inode_chksum);
 }
 
 void fsnodes_init_freebitmask (void) {
@@ -2606,8 +2608,8 @@ static inline uint32_t fsnodes_getdetached(fsedge *start,uint8_t *dbuff) {
 	return result;
 }
 
-static inline uint32_t fsnodes_readdirsize(fsnode *p,fsedge *e,uint32_t maxentries,uint64_t nedgeid,uint8_t attrmode) {
-	uint32_t result = 0;
+static inline uint64_t fsnodes_readdirsize(fsnode *p,fsedge *e,uint32_t maxentries,uint64_t nedgeid,uint8_t attrmode) {
+	uint64_t result = 0;
 	uint8_t attrsize = (attrmode==0)?1:(attrmode==1)?35:ATTR_RECORD_SIZE;
 	while (maxentries>0 && nedgeid<EDGEID_MAX) {
 		if (nedgeid==0) {
@@ -4697,10 +4699,15 @@ uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint
 		return MFS_STATUS_OK;
 	}
 	if (flags & TRUNCATE_FLAG_RESERVE) { // this is not real truncate - this is part of write
-		if (length + p->data.fdata.length < length) {
+		uint64_t vleng;
+		vleng = appendres_getvleng(inode);
+		if (vleng < p->data.fdata.length) {
+			vleng = p->data.fdata.length;
+		}
+		if (length + vleng < length) {
 			return MFS_ERROR_INDEXTOOBIG;
 		}
-		length += p->data.fdata.length;
+		length += vleng;
 	} else {
 		if (disflags&1) { // truncate (decrease file size) not allowed in session
 			if (length<p->data.fdata.length) {
@@ -4746,7 +4753,7 @@ uint8_t fs_try_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint
 			return MFS_ERROR_QUOTA;
 		}
 	}
-	if (length!=p->data.fdata.length) {
+	if ((flags & TRUNCATE_FLAG_RESERVE)==0 && length!=p->data.fdata.length) {
 		if (length&MFSCHUNKMASK) {
 			*indx = (length>>MFSCHUNKBITS);
 			if (*indx<p->data.fdata.chunks) {
@@ -4821,25 +4828,34 @@ uint8_t fs_do_setlength(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint8
 	if (fsnodes_node_find_ext(rootinode,sesflags,&inode,NULL,&p,flags & TRUNCATE_FLAG_OPENED)==0) {
 		return MFS_ERROR_ENOENT;
 	}
-	*prevlength = p->data.fdata.length;
 	if (flags & TRUNCATE_FLAG_RESERVE) {
-		length += p->data.fdata.length;
-	}
-	if (flags & TRUNCATE_FLAG_UPDATE) {
-		if (length>p->data.fdata.length) {
-			fsnodes_setlength(p,length);
-			changelog("%"PRIu32"|LENGTH(%"PRIu32",%"PRIu64",0)",ts,inode,p->data.fdata.length);
+		uint64_t vleng;
+		vleng = appendres_getvleng(inode);
+		if (vleng < p->data.fdata.length) {
+			vleng = p->data.fdata.length;
 		}
+		*prevlength = vleng;
+		length += vleng;
+		appendres_setvleng(inode,length);
 	} else {
-		if (length==p->data.fdata.length && (flags&TRUNCATE_FLAG_TIMEFIX)) {
-			chtime = 0;
+		*prevlength = p->data.fdata.length;
+		if (flags & TRUNCATE_FLAG_UPDATE) {
+			if (length>p->data.fdata.length) {
+				fsnodes_setlength(p,length);
+				changelog("%"PRIu32"|LENGTH(%"PRIu32",%"PRIu64",0)",ts,inode,p->data.fdata.length);
+			}
+		} else {
+			if (length==p->data.fdata.length && (flags&TRUNCATE_FLAG_TIMEFIX)) {
+				chtime = 0;
+			}
+			fsnodes_setlength(p,length);
+			changelog("%"PRIu32"|LENGTH(%"PRIu32",%"PRIu64",%"PRIu8")",ts,inode,p->data.fdata.length,chtime);
+			if (chtime) {
+				p->ctime = p->mtime = ts;
+			}
+			stats_setattr++;
 		}
-		fsnodes_setlength(p,length);
-		changelog("%"PRIu32"|LENGTH(%"PRIu32",%"PRIu64",%"PRIu8")",ts,inode,p->data.fdata.length,chtime);
-		if (chtime) {
-			p->ctime = p->mtime = ts;
-		}
-		stats_setattr++;
+		appendres_clear(inode);
 	}
 	fsnodes_fill_attr(p,NULL,uid,gid,auid,agid,sesflags,attr,1);
 	return MFS_STATUS_OK;
@@ -5881,6 +5897,7 @@ uint8_t fs_mr_append_slice(uint32_t ts,uint32_t inode,uint32_t inode_src,uint32_
 }
 
 uint8_t fs_readdir_size(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t uid,uint32_t gids,uint32_t *gid,uint8_t flags,uint32_t maxentries,uint64_t nedgeid,void **dnode,void **dedge,uint32_t *dbuffsize,uint8_t attrmode) {
+	uint64_t r;
 	fsnode *p;
 	fsedge *e;
 	*dnode = NULL;
@@ -5919,7 +5936,11 @@ uint8_t fs_readdir_size(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint3
 	}
 	*dnode = p;
 	*dedge = e;
-	*dbuffsize = fsnodes_readdirsize(p,e,maxentries,nedgeid,(flags&GETDIR_FLAG_WITHATTR)?attrmode:0);
+	r = fsnodes_readdirsize(p,e,maxentries,nedgeid,(flags&GETDIR_FLAG_WITHATTR)?attrmode:0);
+	if (r>=UINT64_C(0xFFFF0000)) {
+		return MFS_ERROR_ERANGE;
+	}
+	*dbuffsize = r;
 	return MFS_STATUS_OK;
 }
 
@@ -6003,6 +6024,7 @@ uint8_t fs_opencheck(uint32_t rootinode,uint8_t sesflags,uint32_t inode,uint32_t
 				return MFS_ERROR_EACCES;
 			}
 			fsnodes_setlength(p,0);
+			appendres_clear(inode);
 			changelog("%"PRIu32"|LENGTH(%"PRIu32",0,1)",ts,inode);
 			p->ctime = p->mtime = ts;
 		}
@@ -6315,6 +6337,7 @@ uint8_t fs_writeend(uint32_t inode,uint64_t length,uint64_t chunkid,uint8_t chun
 			if (flenghaschanged!=NULL) {
 				*flenghaschanged = 1;
 			}
+			appendres_setrleng(inode,length);
 		}
 //		{
 //			uint32_t i;
@@ -7976,6 +7999,7 @@ void fs_cleanup(void) {
 	filenodes=0;
 	maxnodeid=0;
 	hashelements=0;
+	appendres_cleanall();
 }
 
 static inline void fs_storeedge(fsedge *e,bio *fd) {
@@ -8069,9 +8093,24 @@ static inline int fs_loadedge(bio *fd,uint8_t mver,int ignoreflag) {
 			nl=0;
 		}
 		mfs_arg_syslog(LOG_ERR,"loading edge: %"PRIu32"->%"PRIu32" error: empty name",parent_id,child_id);
-		return -1;
-	}
-	if (parent_id==0 && nleng>MFS_PATH_MAX) {
+		if (ignoreflag==0) {
+			fprintf(stderr,"use option '-i' to generate name replacement\n");
+			return -1;
+		} else {
+			char tmpname[20];
+			uint8_t len;
+			len = snprintf(tmpname,20,"(empty %"PRIu32")",child_id);
+			if (len>20) {
+				len=20;
+			}
+			e = fsedge_malloc(len);
+			passert(e);
+			memcpy((uint8_t*)(e->name),tmpname,len);
+			e->nleng = len;
+			fprintf(stderr,"loading edge: %"PRIu32"->%"PRIu32" empty filename replaced by '(empty %"PRIu32")'\n",parent_id,child_id,child_id);
+			syslog(LOG_ERR,"loading edge: %"PRIu32"->%"PRIu32" empty filename replaced by '(empty %"PRIu32")'",parent_id,child_id,child_id);
+		}
+	} else if (parent_id==0 && nleng>MFS_PATH_MAX) {
 		mfs_arg_syslog(LOG_WARNING,"loading edge: %"PRIu32"->%"PRIu32" error: name too long (%"PRIu16") -> truncate",parent_id,child_id,nleng);
 		e = fsedge_malloc(MFS_PATH_MAX);
 		passert(e);
@@ -8088,16 +8127,18 @@ static inline int fs_loadedge(bio *fd,uint8_t mver,int ignoreflag) {
 		passert(e);
 		e->nleng = nleng;
 	}
-	if (bio_read(fd,(uint8_t*)(e->name),e->nleng)!=e->nleng) {
-		int err = errno;
-		if (nl) {
-			fputc('\n',stderr);
-			nl=0;
+	if (nleng>0) {
+		if (bio_read(fd,(uint8_t*)(e->name),e->nleng)!=e->nleng) {
+			int err = errno;
+			if (nl) {
+				fputc('\n',stderr);
+				nl=0;
+			}
+			errno = err;
+			mfs_errlog(LOG_ERR,"loading edge: read error");
+			fsedge_free(e,nleng);
+			return -1;
 		}
-		errno = err;
-		mfs_errlog(LOG_ERR,"loading edge: read error");
-		fsedge_free(e,nleng);
-		return -1;
 	}
 	e->child = fsnodes_node_find(child_id);
 	if (e->child==NULL) {
@@ -9058,7 +9099,7 @@ int fs_loadquota(bio *fd,uint8_t mver,int ignoreflag) {
 			if (ignoreflag) {
 				ptr+=(rsize-4);
 			} else {
-				fprintf(stderr,"use option '-i' to remove this quota definition");
+				fprintf(stderr,"use option '-i' to remove this quota definition\n");
 				return -1;
 			}
 		} else {
@@ -9153,7 +9194,6 @@ void fs_cs_disconnected(void) {
 
 
 void fs_reload(void) {
-	uint32_t mlink;
 	if (cfg_isdefined("QUOTA_TIME_LIMIT") && !cfg_isdefined("QUOTA_DEFAULT_GRACE_PERIOD")) {
 		QuotaDefaultGracePeriod = cfg_getuint32("QUOTA_TIME_LIMIT",7*86400); // deprecated option
 	} else {
@@ -9164,16 +9204,24 @@ void fs_reload(void) {
 		syslog(LOG_NOTICE,"unrecognized value for ATIME_MODE - using defaults");
 		AtimeMode = 0;
 	}
-	mlink = cfg_getuint32("MAX_ALLOWED_HARD_LINKS",32767);
-	if (mlink<8) {
-		syslog(LOG_NOTICE,"MAX_ALLOWED_HARD_LINKS is less than 8 - less that minimum number of hard links requierd by POSIX - setting to 8");
-		mlink = 8;
+	MaxAllowedHardLinks = cfg_getuint32("MAX_ALLOWED_HARD_LINKS",32767);
+	if (MaxAllowedHardLinks<8) {
+		syslog(LOG_NOTICE,"MAX_ALLOWED_HARD_LINKS is lower than 8 - less that minimum number of hard links requierd by POSIX - setting to 8");
+		MaxAllowedHardLinks = 8;
 	}
-	if (mlink>65000) {
-		syslog(LOG_NOTICE,"MAX_ALLOWED_HARD_LINKS is greater than 65000 - setting to 65000");
-		mlink = 65000;
+	if (MaxAllowedHardLinks>65000) {
+		syslog(LOG_NOTICE,"MAX_ALLOWED_HARD_LINKS is higher than 65000 - setting to 65000");
+		MaxAllowedHardLinks = 65000;
 	}
-	MaxAllowedHardLinks = mlink;
+	InodeReuseDelay = cfg_getuint32("INODE_REUSE_DELAY",86400);
+	if (InodeReuseDelay<300) {
+		syslog(LOG_NOTICE,"INODE_REUSE_DELAY is lower than 300 - setting to 300");
+		InodeReuseDelay = 300;
+	}
+	if (InodeReuseDelay>3000000) {
+		syslog(LOG_NOTICE,"INODE_REUSE_DELAY is higher than 3000000 - setting to 3000000");
+		InodeReuseDelay = 3000000;
+	}
 }
 
 int fs_strinit(void) {
@@ -9202,6 +9250,7 @@ int fs_strinit(void) {
 	fsedge_init();
 	symlink_init();
 	chunktab_init();
+	appendres_init();
 	test_start_time = main_time()+900;
 	fs_reload();
 	snapshot_inodehash = chash_new();

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2021 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -25,7 +25,7 @@
 
 void symlink_cache_insert(uint32_t inode,const uint8_t *path);
 uint8_t* symlink_cache_search(uint32_t inode);
-void symlink_cache_init(void);
+void symlink_cache_init(double to);
 void symlink_cache_term(void);
 
 #endif

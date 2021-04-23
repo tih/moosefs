@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+ * Copyright (C) 2021 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
  * 
  * This file is part of MooseFS.
  * 
@@ -75,8 +75,6 @@
 #define MFS_PATH_MAX 1024
 
 #define MFS_MAX_FILE_SIZE (((uint64_t)(MFSCHUNKSIZE))<<31)
-
-#define MFS_INODE_REUSE_DELAY 86400
 
 #define TRASH_BUCKETS 4096
 #define SUSTAINED_BUCKETS 256

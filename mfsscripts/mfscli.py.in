@@ -1,6 +1,6 @@
 #!/usr/bin/env @PYTHON@
 
-# Copyright (C) 2020 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
+# Copyright (C) 2021 Jakub Kruszona-Zawadzki, Core Technology Sp. z o.o.
 # 
 # This file is part of MooseFS.
 # 
@@ -98,6 +98,7 @@ import traceback
 import os
 import subprocess
 import codecs
+import json
 
 cgimode = 1 if 'GATEWAY_INTERFACE' in os.environ else 0
 
@@ -1354,12 +1355,15 @@ def labelmasks_to_str(labelmasks):
 		r.append(labelmask_to_str(labelmask))
 	return "+".join(r)
 
+
 def print_exception():
 	exc_type, exc_value, exc_traceback = sys.exc_info()
 	try:
 		if cgimode:
 			print("""<table class="FR" cellspacing="0">""")
-			print("""<tr><td align="left"><pre>""")
+			print("""<tr><th>Oops!</th></tr>""")
+			print("""<tr><td align="left"><b>An error has occured. Check your MooseFS configuration and network connections. If you decide to seek support because of this error, please include the following traceback:</b>""")
+			print("""<pre>""")
 			print(traceback.format_exc().strip())
 			print("""</pre></td></tr>""")
 			print("""</table>""")
@@ -2438,7 +2442,7 @@ if leaderfound==0:
 		elif electfound:
 			out.append("""	<tr>""")
 			out.append("""		<td align="center">""")
-			out.append("""			<span class="ERROR">Leader master server not found, but there is an elect, so make sure that all chunkservers are running - elect should became a leader soon</span><br />""")
+			out.append("""			<span class="ERROR">Leader master server not found, but there is an elect, so make sure that all chunkservers are running - elect should become a leader soon</span><br />""")
 			out.append("""		</td>""")
 			out.append("""	</tr>""")
 		else:
@@ -2461,7 +2465,7 @@ if leaderfound==0:
 		if len(masterlist)==0:
 			print("""Can't find masters (resolve '%s') !!!""" % (masterhost))
 		elif electfound:
-			print("Leader master server not found, but there is an elect, so make sure that all chunkservers are running - elect should became a leader soon")
+			print("Leader master server not found, but there is an elect, so make sure that all chunkservers are running - elect should become a leader soon")
 		else:
 			print("Working master servers not found !!! - maybe you are using wrong port number or wrong dns name")
 	if not cgimode:
@@ -4846,7 +4850,7 @@ if "HD" in sectionset:
 				else:
 					if cgimode:
 						errtimetuple = time.localtime(errtime)
-						lerror = '<a style="cursor:default" title="%s on chunk: %u">%s</a>' % (time.strftime("%Y-%m-%d %H:%M:%S",errtimetuple),errchunkid,time.strftime("%Y-%m-%d %H:%M",errtimetuple))
+						lerror = '<a style="cursor:default" title="%s on chunk: %016X">%s</a>' % (time.strftime("%Y-%m-%d %H:%M:%S",errtimetuple),errchunkid,time.strftime("%Y-%m-%d %H:%M",errtimetuple))
 					elif ttymode:
 						errtimetuple = time.localtime(errtime)
 						lerror = time.strftime("%Y-%m-%d %H:%M",errtimetuple)
@@ -4855,7 +4859,7 @@ if "HD" in sectionset:
 				if cgimode:
 					out.append("""	<tr>""")
 					out.append("""		<td align="right"></td>""")
-					out.append("""		<td align="left"><span class="hddaddrname_vis0"><span class="sortkey">%s </span>%s</span><span class="hddaddrname_vis1">%s</span></td>""" % (sortippath,ippath,hostpath))
+					out.append("""		<td align="left"><span class="hddaddrname_vis0"><span class="sortkey">%s </span>%s</span><span class="hddaddrname_vis1">%s</span></td>""" % (htmlentities(sortippath),htmlentities(ippath),htmlentities(hostpath)))
 					out.append("""		<td align="right">%u</td><td align="right"><span class="sortkey">%u </span>%s</td><td align="right">%s</td>""" % (chunkscnt,errtime,lerror,status))
 					validdata = [1,1,1]
 					for i in range(3):
@@ -5212,7 +5216,7 @@ if "EX" in sectionset:
 				out.append("""		<td align="right"></td>""")
 				out.append("""		<td align="center"><span class="sortkey">%s </span>%s</td>""" % (sortipfrom,ipfrom))
 				out.append("""		<td align="center"><span class="sortkey">%s </span>%s</td>""" % (sortipto,ipto))
-				out.append("""		<td align="left">%s</td>""" % (".&nbsp;(META)" if meta else path))
+				out.append("""		<td align="left">%s</td>""" % (".&nbsp;(META)" if meta else htmlentities(path)))
 				out.append("""		<td align="center"><span class="sortkey">%s </span>%s</td>""" % (sortver,strver))
 				out.append("""		<td align="center">%s</td>""" % ("-" if meta else "yes" if exportflags&1 else "no"))
 				out.append("""		<td align="center">%s</td>""" % ("yes" if exportflags&2 else "no"))
@@ -5538,12 +5542,12 @@ if "MS" in sectionset and leaderfound:
 				out.append("""		<td align="center">%u</td>""" % sessionid)
 				out.append("""		<td align="left">%s</td>""" % host)
 				out.append("""		<td align="center"><span class="sortkey">%s </span>%s</td>""" % (sortipnum,ipnum))
-				out.append("""		<td align="left">%s</td>""" % info)
+				out.append("""		<td align="left">%s</td>""" % htmlentities(info))
 				if masterconn.version_at_least(1,7,8):
 					out.append("""		<td align="center">%u</td>""" % openfiles)
 					out.append("""		<td align="center">%u</td>""" % nsocks)
 				out.append("""		<td align="center"><span class="sortkey">%s </span><span class="%s">%s</span></td>""" % (sortver,verclass,strver))
-				out.append("""		<td align="left">%s</td>""" % (".&nbsp;(META)" if meta else path))
+				out.append("""		<td align="left">%s</td>""" % (".&nbsp;(META)" if meta else htmlentities(path)))
 				out.append("""		<td align="center">%s</td>""" % ("ro" if sesflags&1 else "rw"))
 				out.append("""		<td align="center">%s</td>""" % ("no" if sesflags&2 else "yes"))
 				out.append("""		<td align="center">%s</td>""" % ("-" if meta else "yes" if sesflags&4 else "no"))
@@ -5796,7 +5800,7 @@ if "MO" in sectionset and leaderfound:
 				out.append("""		<td align="right"></td>""")
 				out.append("""		<td align="left">%s</td>""" % host)
 				out.append("""		<td align="center"><span class="sortkey">%s</span>%s</td>""" % (sortipnum,ipnum))
-				out.append("""		<td align="left">%s</td>""" % info)
+				out.append("""		<td align="left">%s</td>""" % htmlentities(info))
 				for st in range(16):
 					out.append("""		<td align="right">""")
 					out.append("""			<span class="opshour_vis0"><a style="cursor:default" title="current:%u last:%u">%u</a></span>""" % (stats_c[st],stats_l[st],stats_l[st]))
@@ -6016,7 +6020,7 @@ if "RS" in sectionset and leaderfound:
 					zerocolor = (0,0,128)
 					out.append("""	<tr>""")
 					out.append("""		<td align="right">%u</td>""" % sclassid)
-					out.append("""		<td align="right">%s</td>""" % sclassname)
+					out.append("""		<td align="right">%s</td>""" % htmlentities(sclassname))
 					out.append("""		<td align="right">%s</td>""" % ("YES" if admin_only else "NO"))
 					out.append("""		<td align="center">%s</td>""" % ("LOOSE" if mode==0 else "STD" if mode==1 else "STRICT"))
 					out.append("""		<td align="right">%u</td>""" % files)
@@ -6047,7 +6051,10 @@ if "RS" in sectionset and leaderfound:
 						out.append("""		<td align="center"><span class="ERROR">NO</span></td>""")
 					labelsarr = []
 					for labelstr,mscount in create_labellist:
-						msperc = (1.0 * mscount) / scount
+						if scount==0:
+							msperc = 0;
+						else:
+							msperc = (1.0 * mscount) / scount
 						perccolor = (int(zerocolor[0]+(allcolor[0]-zerocolor[0])*msperc),int(zerocolor[1]+(allcolor[1]-zerocolor[1])*msperc),int(zerocolor[2]+(allcolor[2]-zerocolor[2])*msperc))
 						color = "#%02X%02X%02X" % perccolor
 						labelsarr.append("""<span style="color:%s"><a style="cursor:default" title="%u/%u servers">%s</a></span>""" % (color,mscount,scount,labelstr))
@@ -6063,7 +6070,10 @@ if "RS" in sectionset and leaderfound:
 						out.append("""		<td align="center"><span class="ERROR">NO</span></td>""")
 					labelsarr = []
 					for labelstr,mscount in keep_labellist:
-						msperc = (1.0 * mscount) / scount
+						if scount==0:
+							msperc = 0;
+						else:
+							msperc = (1.0 * mscount) / scount
 						perccolor = (int(zerocolor[0]+(allcolor[0]-zerocolor[0])*msperc),int(zerocolor[1]+(allcolor[1]-zerocolor[1])*msperc),int(zerocolor[2]+(allcolor[2]-zerocolor[2])*msperc))
 						color = "#%02X%02X%02X" % perccolor
 						labelsarr.append("""<span style="color:%s"><a style="cursor:default" title="%u/%u servers">%s</a></span>""" % (color,mscount,scount,labelstr))
@@ -6241,9 +6251,9 @@ if "RS" in sectionset and leaderfound:
 						out.append("""		<td align="center">%u</td>""" % sessionid)
 						out.append("""		<td align="left">%s</td>""" % host)
 						out.append("""		<td align="center"><span class="sortkey">%s </span>%s</td>""" % (sortipnum,ipnum))
-						out.append("""		<td align="left">%s</td>""" % info)
+						out.append("""		<td align="left">%s</td>""" % htmlentities(info))
 						out.append("""		<td align="center">%u</td>""" % inode)
-						out.append("""		<td align="left">%s</td>""" % path)
+						out.append("""		<td align="left">%s</td>""" % htmlentities(path))
 						out.append("""	</tr>""")
 				else:
 					if len(paths)==0:
@@ -6367,7 +6377,7 @@ if "RS" in sectionset and leaderfound:
 					out.append("""		<td align="center">%u</td>""" % sessionid)
 					out.append("""		<td align="left">%s</td>""" % host)
 					out.append("""		<td align="center"><span class="sortkey">%s </span>%s</td>""" % (sortipnum,ipnum))
-					out.append("""		<td align="left">%s</td>""" % info)
+					out.append("""		<td align="left">%s</td>""" % htmlentities(info))
 					out.append("""		<td align="center">%s</td>""" % locktype)
 					out.append("""		<td align="right">%u</td>""" % owner)
 					if pid==0 and start==0 and end==0:
@@ -6596,7 +6606,7 @@ if "QU" in sectionset:
 				if cgimode:
 					out.append("""	<tr>""")
 					out.append("""		<td align="right"></td>""")
-					out.append("""		<td align="left">%s</td>""" % path)
+					out.append("""		<td align="left">%s</td>""" % htmlentities(path))
 	#				out.append("""		<td align="center">%s</td>""" % ("yes" if exceeded else "no"))
 					if graceperiod>0:
 						out.append("""		<td align="center"><span class="sortkey">%u </span><a style="cursor:default" title="%s">%s</a></td>""" % (graceperiod,timeduration_to_fullstr(graceperiod),timeduration_to_shortstr(graceperiod)))
@@ -7066,11 +7076,7 @@ if "MC" in sectionset:
 	}
 	function ma_change_type(id,no) {
 		var o;
-		o = document.getElementById("ma_cell_"+id+"_"+ma_chartid[id]);
-		o.className="REL";
 		ma_chartid[id]=no;
-		o = document.getElementById("ma_cell_"+id+"_"+ma_chartid[id]);
-		o.className="PR";
 		o = document.getElementById("ma_desc"+id);
 		o.innerHTML = ma_idesc[no];
 		ma_refresh();
@@ -7105,7 +7111,7 @@ if "MC" in sectionset:
 					out.append("""	</tr>""")
 				out.append("""</table>""")
 
-				out.append("""<table class="FR" cellspacing="0" cellpadding="0">""")
+				out.append("""<form action="#"><table class="FR" cellspacing="0" cellpadding="0">""")
 				out.append("""	<tr>""")
 				out.append("""		<th class="RANGEBAR"><a href="javascript:ma_change_down(0);">short range</a></th>""")
 				out.append("""		<th class="RANGEBAR"><a href="javascript:ma_change_down(1);">medium range</a></th>""")
@@ -7123,20 +7129,15 @@ if "MC" in sectionset:
 					out.append("""		</td>""")
 					out.append("""	</tr>""")
 					out.append("""	<tr>""")
-					out.append("""		<td colspan="4">""")
-					out.append("""			<table class="BOTMENU" cellspacing="0">""")
-					out.append("""				<tr>""")
-					no=0
-					cl="PR"
+					out.append("""		<th colspan="4">""")
+					out.append("""			<select name="machart%u" size="1" onchange="ma_change_type(%u,this.options[this.selectedIndex].value)">""" % (i,i))
+					no = 0
 					for id,name,desc in charts:
-						out.append("""					<td align="center" id="ma_cell_%u_%u" class="%s"><a href="javascript:ma_change_type(%u,%u);" title="%s">%s</a></td>""" % (i,no,cl,i,no,desc,name))
-						cl="REL"
-						no+=1
-					out.append("""				</tr>""")
-					out.append("""			</table>""")
-					out.append("""		</td>""")
+						out.append("""				<option value="%u">%s</option>""" % (no,desc))
+						no += 1
+					out.append("""		</th>""")
 					out.append("""	</tr>""")
-				out.append("""</table>""")
+				out.append("""</table></form>""")
 			elif len(mchtmp)==1 and len(MCdata)>0:
 				chid = 0
 				for id,name,desc in charts:
@@ -7557,11 +7558,7 @@ if "CC" in sectionset:
 	}
 	function cs_change_type(id,no) {
 		var o;
-		o = document.getElementById("cs_cell_"+id+"_"+cs_chartid[id]);
-		o.className="REL";
 		cs_chartid[id]=no;
-		o = document.getElementById("cs_cell_"+id+"_"+cs_chartid[id]);
-		o.className="PR";
 		o = document.getElementById("cs_desc"+id);
 		o.innerHTML = cs_idesc[no];
 		cs_refresh();
@@ -7596,7 +7593,7 @@ if "CC" in sectionset:
 					out.append("""	</tr>""")
 				out.append("""</table>""")
 
-				out.append("""<table class="FR" cellspacing="0" cellpadding="0">""")
+				out.append("""<form action="#"><table class="FR" cellspacing="0" cellpadding="0">""")
 				out.append("""	<tr>""")
 				out.append("""		<th class="RANGEBAR"><a href="javascript:cs_change_down(0);">short range</a></th>""")
 				out.append("""		<th class="RANGEBAR"><a href="javascript:cs_change_down(1);">medium range</a></th>""")
@@ -7614,20 +7611,15 @@ if "CC" in sectionset:
 					out.append("""		</td>""")
 					out.append("""	</tr>""")
 					out.append("""	<tr>""")
-					out.append("""		<td colspan="4">""")
-					out.append("""			<table class="BOTMENU" cellspacing="0">""")
-					out.append("""				<tr>""")
+					out.append("""		<th colspan="4">""")
+					out.append("""			<select name="cschart%u" size="1" onchange="cs_change_type(%u,this.options[this.selectedIndex].value)">""" % (i,i))
 					no=0
-					cl="PR"
 					for id,name,desc in charts:
-						out.append("""					<td align="center" id="cs_cell_%u_%u" class="%s"><a href="javascript:cs_change_type(%u,%u);" title="%s">%s</a></td>""" % (i,no,cl,i,no,desc,name))
-						cl="REL"
+						out.append("""				<option value="%u">%s</option>""" % (no,desc))
 						no+=1
-					out.append("""				</tr>""")
-					out.append("""			</table>""")
-					out.append("""		</td>""")
+					out.append("""		</th>""")
 					out.append("""	</tr>""")
-				out.append("""</table>""")
+				out.append("""</table></form>""")
 			elif len(cchtmp)==1 and len(CCdata)>0:
 				chid = 0
 				for id,name,desc in charts:
